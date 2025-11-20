@@ -1,0 +1,570 @@
+{
+	"info": {
+		"_postman_id": "aiventory-api-collection",
+		"name": "AIVENTORY API",
+		"description": "Complete API collection for AIVENTORY inventory management system",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Login",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"admin@aiventory.com\",\n  \"password\": \"password\",\n  \"role\": \"Admin\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/login",
+							"host": ["{{base_url}}"],
+							"path": ["api", "login"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Register",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fullName\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"username\": \"johndoe\",\n  \"password\": \"password123\",\n  \"role\": \"Staff\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/register",
+							"host": ["{{base_url}}"],
+							"path": ["api", "register"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Profile",
+			"item": [
+				{
+					"name": "Get Profile",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/profile/Admin/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "profile", "Admin", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Profile",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Updated Name\",\n  \"email\": \"newemail@example.com\",\n  \"username\": \"newusername\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/profile/Admin/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "profile", "Admin", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Change Password",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"currentPassword\": \"oldpassword\",\n  \"newPassword\": \"newpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/profile/Admin/1/password",
+							"host": ["{{base_url}}"],
+							"path": ["api", "profile", "Admin", "1", "password"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Products",
+			"item": [
+				{
+					"name": "Get All Products",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/products",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Single Product",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/products/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create Product",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"Product_name\": \"New Product\",\n  \"Product_sku\": \"SKU001\",\n  \"Product_price\": 99.99,\n  \"Product_category\": \"Electronics\",\n  \"Product_stock\": 10,\n  \"reorder_level\": 5,\n  \"supplier_id\": 1,\n  \"Product_status\": \"Active\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/products",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Product",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"Product_name\": \"Updated Product\",\n  \"Product_sku\": \"SKU001\",\n  \"Product_price\": 109.99,\n  \"Product_category\": \"Electronics\",\n  \"Product_stock\": 15,\n  \"reorder_level\": 5,\n  \"supplier_id\": 1,\n  \"Product_status\": \"Active\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/products/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Product",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/products/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "products", "1"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Suppliers",
+			"item": [
+				{
+					"name": "Get All Suppliers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/suppliers",
+							"host": ["{{base_url}}"],
+							"path": ["api", "suppliers"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create Supplier",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"supplier_name\": \"New Supplier Co.\",\n  \"supplier_contactnum\": \"+1234567890\",\n  \"supplier_email\": \"contact@newsupplier.com\",\n  \"supplier_address\": \"123 Main St\",\n  \"supplier_rating\": 4.5\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/suppliers",
+							"host": ["{{base_url}}"],
+							"path": ["api", "suppliers"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Supplier",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"supplier_name\": \"Updated Supplier Co.\",\n  \"supplier_contactnum\": \"+1234567890\",\n  \"supplier_email\": \"contact@updatedsupplier.com\",\n  \"supplier_address\": \"456 New St\",\n  \"supplier_rating\": 4.8\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/suppliers/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "suppliers", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Supplier",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/suppliers/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "suppliers", "1"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Orders",
+			"item": [
+				{
+					"name": "Get All Orders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/orders",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create Order",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_date\": \"2025-01-15\",\n  \"order_status\": \"Pending\",\n  \"total_amount\": 999.99,\n  \"supplier_id\": 1\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/orders",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Order",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_status\": \"Completed\",\n  \"total_amount\": 1099.99\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/orders/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Order",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/orders/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Order Items",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/orders/1/items",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders", "1", "items"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Add Order Item",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product_id\": 1,\n  \"quantity\": 5,\n  \"price\": 99.99,\n  \"received_date\": \"2025-01-20\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/orders/1/items",
+							"host": ["{{base_url}}"],
+							"path": ["api", "orders", "1", "items"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update Order Item",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"quantity\": 10,\n  \"price\": 89.99,\n  \"received_date\": \"2025-01-25\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/order-items/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "order-items", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Order Item",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/order-items/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "order-items", "1"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Reports",
+			"item": [
+				{
+					"name": "Low Stock Report",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/reports/low-stock",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "low-stock"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Stock by Category",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/reports/stock-by-category",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "stock-by-category"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Supplier Performance",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/reports/supplier-performance",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "supplier-performance"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Monthly Orders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/reports/monthly-orders",
+							"host": ["{{base_url}}"],
+							"path": ["api", "reports", "monthly-orders"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Settings",
+			"item": [
+				{
+					"name": "Get Settings",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/settings/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "settings", "1"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Save Settings",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"notification_threshold\": 10,\n  \"reorder_rule\": \"default\",\n  \"staff_id\": 1\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/settings",
+							"host": ["{{base_url}}"],
+							"path": ["api", "settings"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "ML Prediction",
+			"item": [
+				{
+					"name": "Predict Stock",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/predict/1",
+							"host": ["{{base_url}}"],
+							"path": ["api", "predict", "1"]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5001",
+			"type": "string"
+		},
+		{
+			"key": "token",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
+
