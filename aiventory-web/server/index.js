@@ -6,20 +6,30 @@ import bcrypt from "bcrypt";      // or bcryptjs
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { exec } from "child_process";
-import axios from "axios";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables
 dotenv.config();
 
 const SECRET_KEY = process.env.JWT_SECRET || "aiventory_secret_fallback";
-// Base URL of the Python ML forecasting service.
-// LSTM Forecasting Service runs on port 5202
-// You can override this with the ML_SERVICE_BASE_URL environment variable.
-const ML_SERVICE_BASE_URL = process.env.ML_SERVICE_BASE_URL || "http://127.0.0.1:5202";
 
 // ------------------ INIT ------------------
 const app = express();
-app.use(cors());
+// CORS configuration - allow requests from Vercel frontend and local development
+app.use(cors({
+  origin: [
+    'https://aiventory-web-two.vercel.app',  // Your Vercel deployment
+    'https://aiventory-v4.vercel.app',        // Alternative Vercel URL (if different)
+    'http://localhost:5173',                  // Vite dev server
+    'http://localhost:3000'                   // Alternative local dev
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 // MySQL connection
@@ -2005,82 +2015,55 @@ app.get("/api/notifications", (req, res) => {
 
 app.get("/api/predict/:productId", (req, res) => {
   const { productId } = req.params;
+  const currentStock = parseInt(req.query.stock) || 0;
+  const threshold = parseInt(req.query.threshold) || 10;
+  
+  const projectRoot = path.resolve(__dirname, '../..');
+  const scriptPath = path.join(projectRoot, 'machine-learning', 'services', 'predict_product_arima.py');
+  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
 
-  exec(`python predict_arima.py ${productId}`, (err, stdout, stderr) => {
+  console.log(`🔍 Testing ARIMA for product ${productId} (stock: ${currentStock}, threshold: ${threshold})`);
+  console.log(`   Script: ${scriptPath}`);
+
+  exec(`${pythonCmd} "${scriptPath}" ${productId} ${currentStock} ${threshold}`, 
+    { cwd: projectRoot, maxBuffer: 1024 * 1024 * 10, timeout: 30000 },
+    (err, stdout, stderr) => {
     if (err) {
       console.error("❌ ARIMA Error:", stderr);
-      return res.status(500).json({ error: "Prediction failed" });
+        return res.status(500).json({ error: "Prediction failed", details: stderr });
+      }
+
+      if (!stdout || stdout.trim().length === 0) {
+        console.error("❌ ARIMA returned empty output");
+        return res.status(500).json({ error: "Empty output from ARIMA script" });
     }
 
     try {
-      const forecast = JSON.parse(stdout.replace("'", '"'));
-      res.json({ productId, forecast });
+        const result = JSON.parse(stdout.trim());
+        console.log(`✅ ARIMA result for product ${productId}:`, {
+          success: result.success,
+          method: result.forecast?.method,
+          suggested_qty: result.restock?.suggested_quantity
+        });
+        res.json(result);
     } catch (e) {
-      res.status(200).send(stdout); // fallback plain text
+        console.error("❌ Failed to parse ARIMA JSON:", e.message);
+        console.error("   Raw output (first 500 chars):", stdout.substring(0, 500));
+        res.status(200).json({ 
+          success: false, 
+          error: "Failed to parse ARIMA result",
+          parseError: e.message,
+          output: stdout.substring(0, 500)
+        });
+      }
     }
-  });
+  );
 });
 
-// Train LSTM models endpoint
-app.post("/api/ml/train", async (req, res) => {
-  try {
-    const limit = req.body.limit || null;
-    const response = await axios.post(
-      `${ML_SERVICE_BASE_URL}/api/train`,
-      { limit },
-      { timeout: 300000 } // 5 minute timeout for training
-    );
-    res.json(response.data);
-  } catch (error) {
-    console.error("❌ LSTM training error:", error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message || "Failed to train LSTM models"
-    });
-  }
-});
 
-// Get LSTM service health
-app.get("/api/ml/health", async (req, res) => {
-  try {
-    const response = await axios.get(`${ML_SERVICE_BASE_URL}/api/health`, { timeout: 3000 });
-    res.json(response.data);
-  } catch (error) {
-    res.status(503).json({
-      status: "unavailable",
-      error: "LSTM service not available",
-      message: "Start the LSTM service to enable AI predictions"
-    });
-  }
-});
-
-// Get AI predictions for a product (wrapper endpoint with LSTM integration)
+// Get AI predictions for a product (using database-based calculations)
 app.get("/api/predictions/products/:id", async (req, res) => {
   const { id } = req.params;
-
-  const fetchFromML = async (endpoint) => {
-    try {
-      // Increased timeout to 30 seconds to allow for on-the-fly training
-      // Training a model can take 1-5 seconds, and with data processing, 
-      // it may need more time than the default 5 seconds
-      const response = await axios.get(`${ML_SERVICE_BASE_URL}${endpoint}`, {
-        timeout: 30000, // 30 seconds - allows time for training if needed
-      });
-      return response.data;
-    } catch (mlError) {
-      // Don't log 404 errors as warnings - they're expected for products without enough data
-      if (mlError.response && mlError.response.status === 404) {
-        // Product doesn't have enough historical data (needs 60+ days)
-        // This is normal and will use fallback calculations
-        return null;
-      }
-      // Only log non-404 errors (timeouts, connection issues, etc.)
-      if (!mlError.response || mlError.response.status !== 404) {
-        console.log(`⚠️ ML service request to ${endpoint} failed:`, mlError.message);
-      }
-      return null;
-    }
-  };
 
   try {
     db.query(
@@ -2104,181 +2087,184 @@ app.get("/api/predictions/products/:id", async (req, res) => {
         const currentStock = Number(product.Product_stock) || 0;
         const threshold = Number(product.reorder_level) || 10;
         const productSku = product.Product_sku || String(product.Product_id);
-        const mlProductId =
-          (typeof id === "string" && /[A-Za-z]/.test(id)) ? id : productSku;
 
-        // Try LSTM service first, fallback to old endpoints if needed
-        const [mlForecastResponse, mlRestockResponse] =
-          await Promise.all([
-            fetchFromML(`/api/forecast/${encodeURIComponent(mlProductId)}?days=30`),
-            fetchFromML(`/api/restock/${encodeURIComponent(mlProductId)}?current_stock=${currentStock}&lead_time=7&safety_days=14`),
-          ]);
-
-        const forecastData =
-          mlForecastResponse && mlForecastResponse.success
-            ? mlForecastResponse.data || null
-            : null;
-        const restockData =
-          mlRestockResponse && mlRestockResponse.success
-            ? mlRestockResponse.data || null
-            : null;
-        
-        // Extract depletion and reorder info from restock data
-        const depletionData = restockData ? {
-          depletion_days: restockData.days_until_stockout,
-          confidence: restockData.forecast?.confidence_score || 85,
-          current_stock: restockData.current_stock,
-          predicted_daily_demand: restockData.daily_demand,
-          depletion_date: restockData.days_until_stockout 
-            ? new Date(Date.now() + restockData.days_until_stockout * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-            : null
-        } : null;
-        
-        const reorderData = restockData ? {
-          suggested_quantity: restockData.suggested_quantity,
-          reorder_point: restockData.reorder_point,
-          lead_time_days: 7,
-          safety_stock_days: 14,
-          daily_demand: restockData.daily_demand,
-          safety_stock: restockData.safety_stock
-        } : null;
-
-        let depletionPrediction = null;
-        let reorderSuggestion = null;
-        let forecastOverview = null;
-        let predictionPayload = null;
-
-        if (depletionData) {
-          const depletionDays =
-            depletionData.depletion_days ??
-            depletionData.days_until_depletion ??
-            null;
-          const predictedDailyDemand =
-            depletionData.predicted_daily_demand ?? null;
-          const depletionDate =
-            typeof depletionDays === "number" && Number.isFinite(depletionDays)
-              ? new Date(
-                  Date.now() + depletionDays * 24 * 60 * 60 * 1000
-                ).toISOString()
-              : null;
-
-          depletionPrediction = {
-            depletion_days: depletionDays,
-            confidence: depletionData.confidence ?? 85,
-            current_stock: currentStock,
-            predicted_daily_demand: predictedDailyDemand,
-            prediction_method: "lstm",
-            depletion_date: depletionData.depletion_date || depletionDate,
-          };
-        }
-
-        if (reorderData) {
-          reorderSuggestion = {
-            suggested_quantity:
-              reorderData.suggested_quantity ??
-              reorderData.suggested_reorder_quantity ??
-              Math.max(threshold * 2, 20),
-            lead_time_days: reorderData.lead_time_days ?? 7,
-            safety_stock_days: reorderData.safety_stock_days ?? 5,
-            predicted_daily_demand:
-              reorderData.predicted_daily_demand ??
-              depletionPrediction?.predicted_daily_demand ??
-              null,
-          };
-        }
-
-        if (forecastData) {
-          const forecastDemand = Array.isArray(forecastData.forecast_demand)
-            ? forecastData.forecast_demand
-            : Array.isArray(forecastData.forecast)
-            ? forecastData.forecast
-            : [];
+        // Try ARIMA prediction first - MUST WORK FOR ALL PRODUCTS
+        const tryARIMAPrediction = () => new Promise((resolve) => {
+          // Get the project root directory (two levels up from server/)
+          const projectRoot = path.resolve(__dirname, '../..');
+          const scriptPath = path.join(projectRoot, 'machine-learning', 'services', 'predict_product_arima.py');
+          const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
           
-          // Extract confidence intervals if available
-          const confidenceIntervals = Array.isArray(forecastData.confidence_intervals)
-            ? forecastData.confidence_intervals
-            : [];
-          const confidenceLower = confidenceIntervals.map(ci => ci[0] || 0);
-          const confidenceUpper = confidenceIntervals.map(ci => ci[1] || 0);
+          // Verify script exists
+          if (!fs.existsSync(scriptPath)) {
+            console.error(`❌ ARIMA script not found at: ${scriptPath}`);
+            resolve(null);
+            return;
+          }
           
-          const cumulativeDemand = forecastDemand.reduce(
-            (acc, value) => {
-              const previous = acc.length > 0 ? acc[acc.length - 1] : 0;
-              acc.push(previous + (Number(value) || 0));
-              return acc;
-            },
-            []
+          console.log(`🔍 Attempting ARIMA prediction for product ${product.Product_id} (${product.Product_name})...`);
+          console.log(`   Script path: ${scriptPath}`);
+          console.log(`   Command: ${pythonCmd} "${scriptPath}" ${product.Product_id} ${currentStock} ${threshold}`);
+          console.log(`   Working directory: ${projectRoot}`);
+          
+          const startTime = Date.now();
+          exec(`${pythonCmd} "${scriptPath}" ${product.Product_id} ${currentStock} ${threshold}`, 
+            { cwd: projectRoot, maxBuffer: 1024 * 1024 * 10, timeout: 30000 }, // 30 second timeout
+            (err, stdout, stderr) => {
+              const duration = Date.now() - startTime;
+              console.log(`   ARIMA call completed in ${duration}ms`);
+              
+              if (err) {
+                console.error(`❌ ARIMA script error for product ${product.Product_id}:`, err.message);
+                if (stderr) console.error(`   Stderr:`, stderr.substring(0, 200));
+                resolve(null);
+                return;
+              }
+              if (!stdout || stdout.trim().length === 0) {
+                console.warn(`⚠️ ARIMA script returned empty output for product ${product.Product_id}`);
+                if (stderr) console.warn(`   Stderr:`, stderr.substring(0, 200));
+                resolve(null);
+                return;
+              }
+              
+              // Log raw output for debugging (first 200 chars)
+              console.log(`   Raw output (first 200 chars):`, stdout.substring(0, 200));
+              
+              try {
+                // Clean stdout - remove any extra whitespace or error messages
+                const cleanOutput = stdout.trim();
+                const arimaResult = JSON.parse(cleanOutput);
+                
+                if (arimaResult.success && arimaResult.forecast && arimaResult.restock) {
+                  // Convert ARIMA result to our format
+                  const forecast = arimaResult.forecast;
+                  const restock = arimaResult.restock;
+                  
+                  const depletionDays = restock.days_until_stockout;
+                  const depletionDate = depletionDays 
+                    ? new Date(Date.now() + depletionDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+                    : null;
+                  
+                  const method = forecast.method || 'ARIMA';
+                  const isARIMA = method === 'ARIMA';
+                  
+                  // Log successful ARIMA prediction - VERY VISIBLE
+                  console.log(`✅✅✅ ARIMA SUCCESS for ${product.Product_name} (ID: ${product.Product_id}):`);
+                  console.log(`   Method: ${method}, Suggested Qty: ${restock.suggested_quantity}, Daily Demand: ${restock.daily_demand?.toFixed(2) || 'N/A'}`);
+                  console.log(`   ⭐ THIS WILL BE USED INSTEAD OF FALLBACK! ⭐`);
+                  
+                  resolve({
+                    depletion: {
+                      depletion_days: depletionDays,
+                      confidence: forecast.confidence_score || 85,
+                      current_stock: currentStock,
+                      predicted_daily_demand: restock.daily_demand,
+                      prediction_method: isARIMA ? "ARIMA" : method,
+                      depletion_date: depletionDate,
+                    },
+                    reorder: {
+                      suggested_quantity: restock.suggested_quantity,
+                      lead_time_days: 7,
+                      safety_stock_days: 14,
+                      predicted_daily_demand: restock.daily_demand,
+                      overstocking_risk: restock.overstocking_risk || 'low',
+                      understocking_risk: restock.understocking_risk || 'medium',
+                      optimal_stock: restock.optimal_stock || (currentStock + restock.suggested_quantity),
+                    },
+                    forecast: {
+                      forecast_demand: forecast.forecast_demand || [],
+                      confidence_lower: [],
+                      confidence_upper: [],
+                      cumulative_demand: (forecast.forecast_demand || []).reduce((acc, value, idx) => {
+                        const previous = idx > 0 ? acc[idx - 1] : 0;
+                        acc.push(previous + (Number(value) || 0));
+                        return acc;
+                      }, []),
+                      days_ahead: forecast.forecast_demand?.length || 30,
+                      confidence_score: forecast.confidence_score || 85,
+                      model_type: isARIMA ? "ARIMA" : method,
+                      method: method
+                    }
+                  });
+                } else {
+                  console.warn(`⚠️ ARIMA result invalid for product ${product.Product_id}:`, arimaResult.error || 'Missing forecast/restock data');
+                  if (arimaResult.error) {
+                    console.warn(`   Error details:`, arimaResult.error);
+                  }
+                  resolve(null);
+                }
+              } catch (parseErr) {
+                console.error(`❌❌❌ Failed to parse ARIMA JSON for product ${product.Product_id}:`, parseErr.message);
+                console.error(`   JSON Error at position:`, parseErr.message.match(/position (\d+)/)?.[1] || 'unknown');
+                console.error(`   Raw output length:`, stdout.length);
+                console.error(`   Raw output (first 1000 chars):`, stdout.substring(0, 1000));
+                if (stdout.length > 1000) {
+                  console.error(`   Raw output (last 200 chars):`, stdout.substring(Math.max(0, stdout.length - 200)));
+                }
+                resolve(null);
+              }
+            }
           );
-
-          forecastOverview = {
-            forecast_demand: forecastDemand,
-            confidence_lower: confidenceLower.length > 0 ? confidenceLower : [],
-            confidence_upper: confidenceUpper.length > 0 ? confidenceUpper : [],
-            cumulative_demand: cumulativeDemand,
-            days_ahead: forecastData.forecast_days || forecastDemand.length,
-            confidence_score: forecastData.confidence_score || 85,
-            model_type: forecastData.model_type || "lstm"
-          };
-        }
+        });
 
         const resolveFallbackPrediction = () =>
           new Promise((resolve) => {
             // Helper function to finish calculation
             const finishCalculation = (avgDailyConsumption) => {
-              const daysUntilDepletion =
-                avgDailyConsumption > 0
-                  ? Math.ceil(currentStock / avgDailyConsumption)
-                  : null;
-              const depletionDate =
-                typeof daysUntilDepletion === "number"
-                  ? new Date(
-                      Date.now() + daysUntilDepletion * 24 * 60 * 60 * 1000
-                    ).toISOString()
-                  : null;
+                const daysUntilDepletion =
+                  avgDailyConsumption > 0
+                    ? Math.ceil(currentStock / avgDailyConsumption)
+                    : null;
+                const depletionDate =
+                  typeof daysUntilDepletion === "number"
+                    ? new Date(
+                        Date.now() + daysUntilDepletion * 24 * 60 * 60 * 1000
+                      ).toISOString()
+                    : null;
 
-              const fallbackDepletion = {
-                depletion_days: daysUntilDepletion,
-                confidence: 75,
-                current_stock: currentStock,
-                predicted_daily_demand: avgDailyConsumption,
-                prediction_method: "calculated",
-                depletion_date: depletionDate,
-              };
+                const fallbackDepletion = {
+                  depletion_days: daysUntilDepletion,
+                  confidence: 75,
+                  current_stock: currentStock,
+                  predicted_daily_demand: avgDailyConsumption,
+                  prediction_method: "calculated",
+                  depletion_date: depletionDate,
+                };
 
               // Calculate restock quantity more intelligently
               // Use reorder_level as base, or calculate from consumption
               const baseQuantity = threshold > 0 
                 ? Math.max(threshold, Math.ceil(avgDailyConsumption * 21)) // 3 weeks supply
                 : Math.max(20, Math.ceil(avgDailyConsumption * 30)); // 30 days supply, min 20
-              
-              const fallbackReorder = {
+
+                const fallbackReorder = {
                 suggested_quantity: baseQuantity,
-                lead_time_days: 7,
-                safety_stock_days: 5,
-                predicted_daily_demand: avgDailyConsumption,
-              };
+                  lead_time_days: 7,
+                  safety_stock_days: 5,
+                  predicted_daily_demand: avgDailyConsumption,
+                };
 
-              const fallbackForecast = {
-                forecast_demand: Array.from({ length: 14 }, () =>
-                  Math.max(0, Math.round(avgDailyConsumption))
-                ),
-                confidence_lower: [],
-                confidence_upper: [],
-                cumulative_demand: [],
-                days_ahead: 14,
-              };
-              fallbackForecast.cumulative_demand =
-                fallbackForecast.forecast_demand.reduce((acc, value) => {
-                  const previous = acc.length > 0 ? acc[acc.length - 1] : 0;
-                  acc.push(previous + value);
-                  return acc;
-                }, []);
+                const fallbackForecast = {
+                  forecast_demand: Array.from({ length: 14 }, () =>
+                    Math.max(0, Math.round(avgDailyConsumption))
+                  ),
+                  confidence_lower: [],
+                  confidence_upper: [],
+                  cumulative_demand: [],
+                  days_ahead: 14,
+                };
+                fallbackForecast.cumulative_demand =
+                  fallbackForecast.forecast_demand.reduce((acc, value) => {
+                    const previous = acc.length > 0 ? acc[acc.length - 1] : 0;
+                    acc.push(previous + value);
+                    return acc;
+                  }, []);
 
-              resolve({
-                depletion: fallbackDepletion,
-                reorder: fallbackReorder,
-                forecast: fallbackForecast,
-              });
+                resolve({
+                  depletion: fallbackDepletion,
+                  reorder: fallbackReorder,
+                  forecast: fallbackForecast,
+                });
             };
 
             // First try to get consumption from sales table (more accurate)
@@ -2346,11 +2332,43 @@ app.get("/api/predictions/products/:id", async (req, res) => {
             );
           });
 
-        if (!depletionPrediction || !reorderSuggestion) {
+        // Try ARIMA first (AI-powered) - ONLY use AI predictions, no fallback restock recommendations
+        let arimaResult = await tryARIMAPrediction();
+        
+        let depletionPrediction, reorderSuggestion, forecastOverview;
+        let usingAI = false;
+        
+        if (arimaResult) {
+          // Use ARIMA predictions (AI-powered)
+          usingAI = true;
+          depletionPrediction = arimaResult.depletion;
+          reorderSuggestion = arimaResult.reorder;
+          forecastOverview = arimaResult.forecast;
+          
+          // Log AI recommendation
+          const method = forecastOverview.method || forecastOverview.model_type || 'ARIMA';
+          console.log(`✅ AI Recommendation for ${product.Product_name} (ID: ${product.Product_id}):`);
+          console.log(`   Method: ${method}, Restock: ${reorderSuggestion.suggested_quantity} units`);
+          console.log(`   Daily Demand: ${reorderSuggestion.predicted_daily_demand?.toFixed(2) || 'N/A'}, Risk: ${reorderSuggestion.overstocking_risk || 'low'}/${reorderSuggestion.understocking_risk || 'medium'}`);
+        } else {
+          // ARIMA failed - use fallback for depletion prediction only, but NO restock recommendation
           const fallback = await resolveFallbackPrediction();
-          depletionPrediction = depletionPrediction || fallback.depletion;
-          reorderSuggestion = reorderSuggestion || fallback.reorder;
-          forecastOverview = forecastOverview || fallback.forecast;
+          depletionPrediction = fallback.depletion;
+          forecastOverview = fallback.forecast;
+          
+          // Set restock suggestion to null/0 - NO FALLBACK RESTOCK RECOMMENDATION
+          reorderSuggestion = {
+            suggested_quantity: null,  // No recommendation when ARIMA fails
+            lead_time_days: 7,
+            safety_stock_days: 14,
+            predicted_daily_demand: fallback.depletion.predicted_daily_demand || 0,
+            no_ai_prediction: true,
+            message: "AI prediction unavailable - insufficient data for restock recommendation"
+          };
+          
+          console.log(`⚠️ ARIMA failed for ${product.Product_name} (ID: ${product.Product_id})`);
+          console.log(`   ❌ NO RESTOCK RECOMMENDATION - AI prediction required`);
+          console.log(`   Reason: ARIMA script failed or returned insufficient data`);
         }
 
         const status =
@@ -2360,15 +2378,15 @@ app.get("/api/predictions/products/:id", async (req, res) => {
             ? "Warning"
             : "Good";
 
-        const suggestedQty =
-          // Use reorder_level as intelligent default if no suggestion available
-          reorderSuggestion?.suggested_quantity || 
-          (threshold > 0 ? Math.max(threshold, 20) : 20);
+        // Only use AI recommendations - no fallback restock quantity
+        const suggestedQty = reorderSuggestion?.suggested_quantity !== null && reorderSuggestion?.suggested_quantity !== undefined
+          ? reorderSuggestion.suggested_quantity
+          : null;  // No recommendation if ARIMA failed
 
-        predictionPayload = {
+        const predictionPayload = {
           days_until_depletion: depletionPrediction?.depletion_days ?? 0,
           confidence: depletionPrediction?.confidence ?? 75,
-          suggested_reorder_quantity: suggestedQty,
+          suggested_reorder_quantity: suggestedQty,  // null if ARIMA failed, actual value if ARIMA succeeded
           predicted_depletion_date:
             depletionPrediction?.depletion_date ||
             (depletionPrediction?.depletion_days
@@ -2380,7 +2398,13 @@ app.get("/api/predictions/products/:id", async (req, res) => {
                   .split("T")[0]
               : null),
           status,
-          prediction_method: depletionPrediction?.prediction_method ?? "unknown",
+          prediction_method: usingAI ? "ARIMA (AI)" : (depletionPrediction?.prediction_method ?? "calculated"),
+          using_ai: usingAI,
+          ai_prediction_available: usingAI,
+          overstocking_risk: reorderSuggestion?.overstocking_risk || (usingAI ? 'low' : null),
+          understocking_risk: reorderSuggestion?.understocking_risk || (usingAI ? 'medium' : null),
+          optimal_stock: reorderSuggestion?.optimal_stock || (usingAI && suggestedQty ? (currentStock + suggestedQty) : null),
+          no_ai_recommendation: !usingAI,  // Flag to indicate no AI recommendation available
         };
 
         res.json({
@@ -2395,7 +2419,6 @@ app.get("/api/predictions/products/:id", async (req, res) => {
           depletion_prediction: depletionPrediction,
           reorder_suggestion: reorderSuggestion,
           forecast: forecastOverview,
-          ml_service_url: ML_SERVICE_BASE_URL,
           last_updated: new Date().toISOString(),
         });
       }
@@ -2422,19 +2445,8 @@ app.use((err, req, res, next) => {
 // ------------------ START SERVER ------------------
 const PORT = process.env.PORT || 5001;
 // Bind to all network interfaces to accept connections from mobile devices
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Backend running on http://0.0.0.0:${PORT}`);
   console.log(`📱 Mobile app should connect to: http://YOUR_PC_IP:${PORT}/api`);
-  console.log(`🤖 ML service base URL: ${ML_SERVICE_BASE_URL}`);
-  
-  // LSTM Service Health Check
-  try {
-    const healthResponse = await axios.get(`${ML_SERVICE_BASE_URL}/api/health`, { timeout: 3000 });
-    console.log(`✅ LSTM Forecasting Service: ${healthResponse.data.status}`);
-    console.log(`   Trained models: ${healthResponse.data.trained_models || 0}`);
-  } catch (err) {
-    console.warn(`⚠️  LSTM Forecasting Service not available at ${ML_SERVICE_BASE_URL}`);
-    console.warn(`   Start the service with: python machine-learning/services/start_lstm_service.py`);
-  }
   console.log(`💡 Find your IP: ipconfig | findstr IPv4`);
 });

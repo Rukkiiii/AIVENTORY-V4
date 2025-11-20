@@ -84,7 +84,7 @@ export default function Prediction() {
         const cumulativeDemand = Array.isArray(forecastInfo.cumulative_demand)
           ? forecastInfo.cumulative_demand
           : [];
-
+        
         const transformedData = {
           product_id: result.product_sku || targetProductId,
           product_name: productName,
@@ -97,6 +97,8 @@ export default function Prediction() {
           status: mappedStatus,
           forecast_demand: forecastDemand,
           cumulative_demand: cumulativeDemand,
+          prediction_method: depletionInfo.prediction_method || predictionInfo.prediction_method || 'calculated',
+          using_ai: result.using_ai || false,
           last_updated: result.last_updated || new Date().toISOString()
         };
 
@@ -324,18 +326,12 @@ export default function Prediction() {
               )}
             </Typography>
 
-            <Stack spacing={3} direction={{ xs: 'column', md: 'row' }} sx={{ mb: 3 }}>
-              {predictionData.depletion_date && (
-                <Box flex={1}>
-                  <Typography fontWeight={600} color="#2E3A8C" sx={{ mb: 1 }}>Predicted Depletion Date:</Typography>
-                  <Typography variant="h6" fontWeight={700}>{predictionData.depletion_date}</Typography>
-                </Box>
-              )}
-              <Box flex={1}>
-                <Typography fontWeight={600} color="#2E3A8C" sx={{ mb: 1 }}>Recommended Reorder:</Typography>
-                <Typography variant="h6" fontWeight={700}>{predictionData.recommended_reorder_qty} units</Typography>
+            {predictionData.depletion_date && (
+              <Box sx={{ mb: 3 }}>
+                <Typography fontWeight={600} color="#2E3A8C" sx={{ mb: 1 }}>Predicted Depletion Date:</Typography>
+                <Typography variant="h6" fontWeight={700}>{predictionData.depletion_date}</Typography>
               </Box>
-            </Stack>
+            )}
 
             {predictionData.last_updated && (
               <Typography sx={{ fontSize: '0.9rem', color: '#6C757D', mb: 2 }}>

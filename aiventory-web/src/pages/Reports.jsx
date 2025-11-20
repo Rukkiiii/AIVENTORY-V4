@@ -82,11 +82,15 @@ const Reports = () => {
   const [mlPredictions, setMlPredictions] = useState([]);
   const [predictionsLoading, setPredictionsLoading] = useState(false);
   const [salesFilter, setSalesFilter] = useState('2025'); // '2023', '2024', or '2025'
+  const [selectedMonth, setSelectedMonth] = useState(null); // Selected month (1-12) or null for all months
   const [selectedDate, setSelectedDate] = useState(''); // Selected date from calendar
   const [selectedProduct, setSelectedProduct] = useState('all'); // 'all' or specific product ID
   const [productSearch, setProductSearch] = useState(''); // Search term for products
   const [searchAnchorEl, setSearchAnchorEl] = useState(null); // Anchor for search dropdown
   const searchOpen = Boolean(searchAnchorEl);
+  const [restockPredictions, setRestockPredictions] = useState([]); // AI-based restock predictions
+  const [aiPredictions, setAiPredictions] = useState({}); // AI predictions by product ID
+  const [aiPredictionsLoading, setAiPredictionsLoading] = useState(false);
 
   const checkMlService = async () => {
     try {
@@ -216,12 +220,201 @@ const Reports = () => {
         samplePredictions.push({
           date: futureDate.toISOString(),
         value: Math.max(100, 500 * (1 + (Math.random() * 0.3))),
-          type: 'prediction'
+type: 'prediction'
         });
       }
       
       setMlPredictions(samplePredictions);
   };
+
+  // Fetch AI predictions for products
+  const fetchAiPredictions = async () => {
+    if (!products.length) return;
+    
+    setAiPredictionsLoading(true);
+    try {
+      const predictionsMap = {};
+      const productIds = selectedProduct !== 'all' 
+        ? [selectedProduct] 
+        : products.slice(0, 10).map(p => p.Product_id || p.Product_sku); // Limit to first 10 for "all products"
+      
+      // Fetch predictions for each product
+      const predictionPromises = productIds.map(async (productId) => {
+        try {
+          const response = await fetch(`http://127.0.0.1:5001/api/predictions/products/${productId}`);
+          if (!response.ok) return null;
+          
+          const result = await response.json();
+          if (result?.success && result?.forecast) {
+            return { productId, prediction: result };
+          }
+          return null;
+        } catch (error) {
+          console.error(`Failed to fetch AI prediction for product ${productId}:`, error);
+          return null;
+        }
+      });
+      
+      const results = await Promise.all(predictionPromises);
+      results.forEach(result => {
+        if (result) {
+          predictionsMap[result.productId] = result.prediction;
+        }
+      });
+      
+      setAiPredictions(predictionsMap);
+    } catch (error) {
+      console.error('Failed to fetch AI predictions:', error);
+    } finally {
+      setAiPredictionsLoading(false);
+    }
+  };
+
+  // Generate restock predictions based on AI sales trends
+  const generateRestockPredictions = useMemo(() => {
+    if (!products.length || !invoices.length) return [];
+
+    const currentDate = new Date();
+    const currentYear = currentDate.getFullYear();
+    const currentMonth = currentDate.getMonth();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const restockData = [];
+    
+    // Get product sales data for the selected product or all products
+    const targetProductId = selectedProduct !== 'all' ? selectedProduct : null;
+    
+    // Get AI prediction for selected product
+    const aiPrediction = targetProductId ? aiPredictions[targetProductId] : null;
+    const forecastDemand = aiPrediction?.forecast?.forecast_demand || [];
+    const avgDailyDemand = aiPrediction?.forecast?.avg_daily_demand || 
+                          aiPrediction?.reorder_suggestion?.predicted_daily_demand || null;
+    
+    // Analyze sales trends for upcoming 2 years (24 months)
+    for (let yearOffset = 0; yearOffset < 2; yearOffset++) {
+      const targetYear = currentYear + yearOffset;
+      
+      for (let month = 0; month < 12; month++) {
+        const monthDate = new Date(targetYear, month, 1);
+        const isPast = monthDate < new Date(currentYear, currentMonth, 1);
+        if (isPast && yearOffset === 0) continue; // Skip past months in current year
+        
+        // Calculate month index in forecast (days from now)
+        const monthsFromNow = (yearOffset * 12) + month - currentMonth;
+        const daysFromNow = Math.max(0, monthsFromNow * 30);
+        const daysInMonth = new Date(targetYear, month + 1, 0).getDate();
+        
+        let predictedSales = 0;
+        let usingAi = false;
+        
+        // Use AI forecast if available
+        if (forecastDemand.length > 0 && monthsFromNow >= 0 && monthsFromNow < 12) {
+          const startDay = Math.floor(daysFromNow);
+          const endDay = Math.min(startDay + daysInMonth, forecastDemand.length);
+          const monthlyDemand = forecastDemand.slice(startDay, endDay).reduce((sum, val) => sum + (Number(val) || 0), 0);
+          predictedSales = Math.round(monthlyDemand);
+          usingAi = true;
+        } else if (avgDailyDemand && avgDailyDemand > 0 && monthsFromNow >= 0) {
+          // Use average daily demand from AI
+          predictedSales = Math.round(avgDailyDemand * daysInMonth);
+          usingAi = true;
+        } else {
+          // Fallback to historical analysis
+          if (targetProductId) {
+            // Calculate for specific product
+            const historicalSales = invoices.filter(invoice => {
+              if (!Array.isArray(invoice.items)) return false;
+              const invoiceDate = new Date(invoice.invoice_date || invoice.invoiceDate);
+              const invoiceMonth = invoiceDate.getMonth();
+              const invoiceYear = invoiceDate.getFullYear();
+              
+              // Use same month from previous year as baseline
+              return invoiceMonth === month && invoiceYear < targetYear && invoiceYear >= currentYear - 2;
+            }).reduce((total, invoice) => {
+              const item = invoice.items.find(item => 
+                String(item.product_id || item.productId || item.Product_id) === String(targetProductId)
+              );
+              return total + (Number(item?.quantity || item?.Quantity || 0) || 0);
+            }, 0);
+            
+            // Use average of last 2 years for same month
+            const historicalYears = Math.max(1, targetYear - (currentYear - 2));
+            predictedSales = Math.round(historicalSales / historicalYears);
+          } else {
+            // Calculate for all products
+            const historicalSales = invoices.filter(invoice => {
+              const invoiceDate = new Date(invoice.invoice_date || invoice.invoiceDate);
+              const invoiceMonth = invoiceDate.getMonth();
+              const invoiceYear = invoiceDate.getFullYear();
+              return invoiceMonth === month && invoiceYear < targetYear && invoiceYear >= currentYear - 2;
+            }).reduce((total, invoice) => {
+              if (!Array.isArray(invoice.items)) return total;
+              return total + invoice.items.reduce((sum, item) => 
+                sum + (Number(item.quantity || item.Quantity || 0) || 0), 0
+              );
+            }, 0);
+            
+            const historicalYears = Math.max(1, targetYear - (currentYear - 2));
+            predictedSales = Math.round(historicalSales / historicalYears);
+          }
+        }
+        
+        // Use ML predictions if available for next 6 months (backup)
+        if (!usingAi && mlPredictions.length > 0 && yearOffset === 0 && month < 6) {
+          const mlPrediction = mlPredictions[month];
+          if (mlPrediction && mlPrediction.value) {
+            predictedSales = mlPrediction.value;
+            usingAi = true;
+          }
+        }
+        
+        // Calculate average sales for restock threshold
+        const allMonths = restockData.map(d => d.predictedSales);
+        if (allMonths.length > 0) {
+          const avgSales = allMonths.reduce((sum, val) => sum + val, 0) / allMonths.length;
+          const isRestockMonth = predictedSales > avgSales * 1.5 || 
+                                (predictedSales > avgSales && month === 11); // December or peak months
+          
+          restockData.push({
+            period: `${months[month]} ${targetYear}`,
+            month: months[month],
+            year: targetYear,
+            predictedSales: Math.max(0, Math.round(predictedSales)),
+            restockRecommended: isRestockMonth,
+            priority: isRestockMonth ? (predictedSales > avgSales * 2 ? 'high' : 'medium') : 'low',
+            isPredicted: true,
+            usingAi: usingAi
+          });
+        } else {
+          // First month - use simple threshold
+          const isRestockMonth = predictedSales > 100; // Initial threshold
+          restockData.push({
+            period: `${months[month]} ${targetYear}`,
+            month: months[month],
+            year: targetYear,
+            predictedSales: Math.max(0, Math.round(predictedSales)),
+            restockRecommended: isRestockMonth,
+            priority: isRestockMonth ? (predictedSales > 200 ? 'high' : 'medium') : 'low',
+            isPredicted: true,
+            usingAi: usingAi
+          });
+        }
+      }
+    }
+    
+    // Recalculate restock recommendations with full data
+    if (restockData.length > 0) {
+      const avgSales = restockData.reduce((sum, d) => sum + d.predictedSales, 0) / restockData.length;
+      restockData.forEach(item => {
+        item.restockRecommended = item.predictedSales > avgSales * 1.5 || 
+                                  (item.predictedSales > avgSales && item.month === 'Dec');
+        item.priority = item.restockRecommended 
+          ? (item.predictedSales > avgSales * 2 ? 'high' : 'medium') 
+          : 'low';
+      });
+    }
+    
+    return restockData;
+  }, [products, invoices, selectedProduct, mlPredictions, aiPredictions]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -267,6 +460,18 @@ const Reports = () => {
     }
   }, [products.length, mlStatus.connected]);
 
+  // Fetch AI predictions when product selection changes
+  useEffect(() => {
+    if (products.length > 0) {
+      fetchAiPredictions();
+    }
+  }, [products.length, selectedProduct]);
+
+  // Update restock predictions when data changes
+  useEffect(() => {
+    setRestockPredictions(generateRestockPredictions);
+  }, [generateRestockPredictions]);
+
   const metrics = useMemo(() => {
     // Filter products if a specific product is selected
     let filteredProducts = products;
@@ -288,6 +493,29 @@ const Reports = () => {
       (sum, p) => sum + Number(p.Product_stock ?? 0),
       0
     );
+
+    // Get selected product details
+    const selectedProductData = selectedProduct !== 'all' 
+      ? filteredProducts.find(p => 
+          String(p.Product_id || p.Product_sku || p.id) === String(selectedProduct)
+        )
+      : null;
+    
+    const selectedProductStock = selectedProductData 
+      ? Number(selectedProductData.Product_stock ?? 0) 
+      : null;
+    
+    const selectedProductReorderLevel = selectedProductData 
+      ? Number(selectedProductData.reorder_level ?? selectedProductData.reorderLevel ?? 10) 
+      : null;
+    
+    const selectedProductStatus = selectedProductData && selectedProductReorderLevel !== null
+      ? selectedProductStock <= 0
+        ? 'Out of Stock'
+        : selectedProductStock <= selectedProductReorderLevel
+        ? 'Low Stock'
+        : 'In Stock'
+      : null;
     
     // Filter invoices if a specific product is selected
     let filteredInvoices = invoices;
@@ -312,12 +540,58 @@ const Reports = () => {
       0
     );
     
+    // Create product price map from database (CSV prices) - needed for revenue calculations
+    const productPriceMap = new Map();
+    products.forEach(product => {
+      const productId = String(product.Product_id || product.product_id || product.id);
+      const productPrice = Number(product.Product_price || product.product_price || product.price || 0);
+      if (productPrice > 0) {
+        productPriceMap.set(productId, productPrice);
+      }
+    });
+    
+    // Get selected year and month for filtering (used for totalProductSales calculation)
+    const selectedYearForSales = parseInt(salesFilter) || new Date().getFullYear();
+    
     // Calculate total product sales from invoice items (quantity * unit_price)
+    // Filter by selected year and month, use Product_price from database
     const totalProductSales = paidInvoices.reduce((sum, invoice) => {
+      // Filter by selected year and month
+      if (invoice.invoice_date) {
+        let invoiceDate;
+        if (typeof invoice.invoice_date === 'string') {
+          if (invoice.invoice_date.includes('-')) {
+            invoiceDate = new Date(invoice.invoice_date);
+          } else if (invoice.invoice_date.includes('/')) {
+            const [month, day, year] = invoice.invoice_date.split('/');
+            invoiceDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+          } else {
+            invoiceDate = new Date(invoice.invoice_date);
+          }
+        } else {
+          invoiceDate = new Date(invoice.invoice_date);
+        }
+        
+        if (!isNaN(invoiceDate.getTime())) {
+          const invoiceYear = invoiceDate.getFullYear();
+          const invoiceMonth = invoiceDate.getMonth() + 1; // Month is 1-12
+          // Only include invoices from the selected year
+          if (invoiceYear !== selectedYearForSales) {
+            return sum;
+          }
+          // If month is selected, filter by month too
+          if (selectedMonth !== null && invoiceMonth !== selectedMonth) {
+            return sum;
+          }
+        }
+      }
+      
       if (!Array.isArray(invoice.items)) return sum;
       const invoiceSales = invoice.items.reduce((itemSum, item) => {
         const quantity = Number(item.quantity ?? 0);
-        const unitPrice = Number(item.unit_price ?? item.unitPrice ?? 0);
+        const productId = String(item.product_id || item.productId || item.Product_id || '');
+        // Use Product_price from database (CSV prices) instead of item.unit_price
+        const unitPrice = productPriceMap.get(productId) || Number(item.unit_price ?? item.unitPrice ?? item.price ?? item.Price ?? 0);
         return itemSum + (quantity * unitPrice);
       }, 0);
       return sum + invoiceSales;
@@ -379,10 +653,11 @@ const Reports = () => {
     // Find the maximum value for scaling
     const maxValue = Math.max(...chartData.map(d => d.value), 1);
 
-    // Get selected year for filtering
+    // Get selected year and month for filtering
     const selectedYear = parseInt(salesFilter) || new Date().getFullYear();
     
-    // Calculate top 5 selling products (filtered by selected year)
+    // Calculate top 5 selling products (filtered by selected year and month)
+    // Note: productPriceMap is already created above for totalProductSales
     const productSales = {};
     
     paidInvoices.forEach(invoice => {
@@ -406,31 +681,37 @@ const Reports = () => {
           invoiceDate = new Date(invoice.invoice_date);
         }
         
-        // Check if date is valid and matches selected year
+        // Check if date is valid and matches selected year and month
         if (!isNaN(invoiceDate.getTime())) {
           const invoiceYear = invoiceDate.getFullYear();
+          const invoiceMonth = invoiceDate.getMonth() + 1; // Month is 1-12
           
           // Only include invoices from the selected year
           if (invoiceYear === selectedYear) {
-            if (Array.isArray(invoice.items)) {
-              invoice.items.forEach(item => {
-                const productId = item.product_id || item.productId || item.Product_id;
-                const productName = item.product_name || item.Product_name || 'Unknown Product';
-                const quantity = Number(item.quantity || item.Quantity || 0);
-                
-                if (productId && quantity > 0) {
-                  if (!productSales[productId]) {
-                    productSales[productId] = {
-                      id: productId,
-                      name: productName,
-                      totalQuantity: 0,
-                      totalRevenue: 0
-                    };
+            // If month is selected, filter by month too
+            if (selectedMonth === null || invoiceMonth === selectedMonth) {
+              if (Array.isArray(invoice.items)) {
+                invoice.items.forEach(item => {
+                  const productId = String(item.product_id || item.productId || item.Product_id || '');
+                  const productName = item.product_name || item.Product_name || 'Unknown Product';
+                  const quantity = Number(item.quantity || item.Quantity || 0);
+                  // Use Product_price from database (CSV prices) instead of item.price
+                  const price = productPriceMap.get(productId) || Number(item.price || item.Price || 0);
+                  
+                  if (productId && quantity > 0) {
+                    if (!productSales[productId]) {
+                      productSales[productId] = {
+                        id: productId,
+                        name: productName,
+                        totalQuantity: 0,
+                        totalRevenue: 0
+                      };
+                    }
+                    productSales[productId].totalQuantity += quantity;
+                    productSales[productId].totalRevenue += quantity * price;
                   }
-                  productSales[productId].totalQuantity += quantity;
-                  productSales[productId].totalRevenue += quantity * Number(item.price || item.Price || 0);
-                }
-              });
+                });
+              }
             }
           }
         }
@@ -513,12 +794,15 @@ const Reports = () => {
           
           // Only include invoices from the selected year
           if (invoiceYear === selectedYear) {
-            const monthKey = `${invoiceYear}-${String(invoiceMonth).padStart(2, '0')}`;
-            if (yearlyProductSales.hasOwnProperty(monthKey)) {
-              const totalQty = Array.isArray(invoice.items)
-                ? invoice.items.reduce((sum, item) => sum + getItemQuantity(item), 0)
-                : 0;
-              yearlyProductSales[monthKey] += totalQty;
+            // If month is selected, only include that month
+            if (selectedMonth === null || invoiceMonth === selectedMonth) {
+              const monthKey = `${invoiceYear}-${String(invoiceMonth).padStart(2, '0')}`;
+              if (yearlyProductSales.hasOwnProperty(monthKey)) {
+                const totalQty = Array.isArray(invoice.items)
+                  ? invoice.items.reduce((sum, item) => sum + getItemQuantity(item), 0)
+                  : 0;
+                yearlyProductSales[monthKey] += totalQty;
+              }
             }
           }
         }
@@ -560,34 +844,40 @@ const Reports = () => {
           invoiceDate = new Date(invoice.invoice_date);
         }
         
-        // Check if date is valid and matches selected year
+        // Check if date is valid and matches selected year and month
         if (!isNaN(invoiceDate.getTime())) {
           const invoiceYear = invoiceDate.getFullYear();
+          const invoiceMonth = invoiceDate.getMonth() + 1; // Month is 1-12
           
           // Only include invoices from the selected year
           if (invoiceYear === selectedYear) {
-            if (Array.isArray(invoice.items)) {
-              invoice.items.forEach(item => {
-                const productId = item.product_id || item.productId || item.Product_id;
-                const productName = item.product_name || item.Product_name || `Product ${productId}`;
-                const quantity = Number(item.quantity || item.Quantity || 0);
-                const price = Number(item.price || item.Price || 0);
-                
-                if (productId && quantity > 0) {
-                  if (!productSalesDetails[productId]) {
-                    productSalesDetails[productId] = {
-                      id: productId,
-                      name: productName,
-                      totalQuantity: 0,
-                      totalRevenue: 0,
-                      orderCount: 0
-                    };
+            // If month is selected, filter by month too
+            if (selectedMonth === null || invoiceMonth === selectedMonth) {
+              if (Array.isArray(invoice.items)) {
+                invoice.items.forEach(item => {
+                  const productId = String(item.product_id || item.productId || item.Product_id || '');
+                  const productName = item.product_name || item.Product_name || `Product ${productId}`;
+                  const quantity = Number(item.quantity || item.Quantity || 0);
+                  // Use Product_price from database (CSV prices) instead of item.price
+                  // Fallback to item.price if Product_price not available
+                  const price = productPriceMap.get(productId) || Number(item.price || item.Price || 0);
+                  
+                  if (productId && quantity > 0) {
+                    if (!productSalesDetails[productId]) {
+                      productSalesDetails[productId] = {
+                        id: productId,
+                        name: productName,
+                        totalQuantity: 0,
+                        totalRevenue: 0,
+                        orderCount: 0
+                      };
+                    }
+                    productSalesDetails[productId].totalQuantity += quantity;
+                    productSalesDetails[productId].totalRevenue += quantity * price;
+                    productSalesDetails[productId].orderCount += 1;
                   }
-                  productSalesDetails[productId].totalQuantity += quantity;
-                  productSalesDetails[productId].totalRevenue += quantity * price;
-                  productSalesDetails[productId].orderCount += 1;
-                }
-              });
+                });
+              }
             }
           }
         }
@@ -648,8 +938,15 @@ const Reports = () => {
       }
     });
     
-    // Convert to array, maintaining order (products with sales first, then others)
+    // Convert to array and sort alphabetically by product name
     let availableProducts = Array.from(allProductsMap.values());
+    
+    // Sort alphabetically by product name
+    availableProducts.sort((a, b) => {
+      const nameA = (a.name || `Product ${a.id}`).toLowerCase();
+      const nameB = (b.name || `Product ${b.id}`).toLowerCase();
+      return nameA.localeCompare(nameB);
+    });
     
     // Apply search filter if productSearch is set
     if (productSearch && productSearch.trim()) {
@@ -667,6 +964,9 @@ const Reports = () => {
     outOfStockCount: outOfStockProducts.length,
     lowStockProducts,
     outOfStockProducts,
+    selectedProductStock,
+    selectedProductStatus,
+    selectedProductReorderLevel,
     pendingCount: pendingInvoices.length,
     totalInvoiceValue,
     paidInvoiceValue,
@@ -683,7 +983,7 @@ const Reports = () => {
     productDetailsList,
     availableProducts
   };
-}, [products, invoices, mlStatus, mlPredictions, salesFilter, selectedProduct, productSearch]);
+}, [products, invoices, mlStatus, mlPredictions, salesFilter, selectedMonth, selectedProduct, productSearch]);
 
   const recentInvoices = useMemo(() => {
     const sorted = [...invoices].sort((a, b) => {
@@ -897,34 +1197,52 @@ const Reports = () => {
                 <Box display="flex" justifyContent="space-between" alignItems="center">
                   <Box>
                     <Typography color="text.secondary" variant="body2">
-                      {selectedProduct === 'all' ? 'Items in Stock' : 'Current Stock'}
-                    </Typography>
-                    <Typography variant="h4" fontWeight={700} sx={{ color: '#06D6A0' }}>
-                      {metrics.totalStock}
-                    </Typography>
-                  </Box>
-                  <Box sx={{ bgcolor: '#06D6A010', borderRadius: '50%', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <InventoryIcon sx={{ color: '#06D6A0' }} />
-                  </Box>
-                </Box>
-              </CardContent>
-            </Card>
-          </Grid>
-          
-          <Grid item xs={12} sm={6} md={3}>
-            <Card elevation={0} sx={{ borderRadius: 3, border: '1px solid #e5e7eb', height: '100%' }}>
-              <CardContent>
-                <Box display="flex" justifyContent="space-between" alignItems="center">
-                  <Box>
-                    <Typography color="text.secondary" variant="body2">
                       {selectedProduct === 'all' ? 'Low Stock Items' : 'Stock Status'}
                     </Typography>
-                    <Typography variant="h4" fontWeight={700} sx={{ color: '#FFD166' }}>
-                      {selectedProduct === 'all' ? metrics.lowStockCount : (metrics.lowStockCount > 0 ? 'Low' : 'OK')}
+                    <Typography 
+                      variant="h4" 
+                      fontWeight={700} 
+                      sx={{ 
+                        color: selectedProduct !== 'all' && metrics.selectedProductStatus
+                          ? metrics.selectedProductStatus === 'Out of Stock'
+                            ? '#DC2626'
+                            : metrics.selectedProductStatus === 'Low Stock'
+                            ? '#FFD166'
+                            : '#06D6A0'
+                          : '#FFD166'
+                      }}
+                    >
+                      {selectedProduct === 'all' 
+                        ? metrics.lowStockCount 
+                        : metrics.selectedProductStatus || 'OK'}
                     </Typography>
                   </Box>
-                  <Box sx={{ bgcolor: '#FFD16610', borderRadius: '50%', width: 48, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <WarningIcon sx={{ color: '#FFD166' }} />
+                  <Box 
+                    sx={{ 
+                      bgcolor: selectedProduct !== 'all' && metrics.selectedProductStatus
+                        ? metrics.selectedProductStatus === 'Out of Stock'
+                          ? '#DC262610'
+                          : metrics.selectedProductStatus === 'Low Stock'
+                          ? '#FFD16610'
+                          : '#06D6A010'
+                        : '#FFD16610',
+                      borderRadius: '50%', 
+                      width: 48, 
+                      height: 48, 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center' 
+                    }}
+                  >
+                    {selectedProduct !== 'all' && metrics.selectedProductStatus === 'Out of Stock' ? (
+                      <ErrorIcon sx={{ color: '#DC2626' }} />
+                    ) : selectedProduct !== 'all' && metrics.selectedProductStatus === 'Low Stock' ? (
+                      <WarningIcon sx={{ color: '#FFD166' }} />
+                    ) : selectedProduct !== 'all' && metrics.selectedProductStatus === 'In Stock' ? (
+                      <CheckCircleIcon sx={{ color: '#06D6A0' }} />
+                    ) : (
+                      <WarningIcon sx={{ color: '#FFD166' }} />
+                    )}
                   </Box>
                 </Box>
               </CardContent>
@@ -962,31 +1280,57 @@ const Reports = () => {
                   <Typography variant="h6" fontWeight={600}>
                     Product Sales Details
                   </Typography>
-                  <TextField
-                    type="date"
-                    label="Select Date"
-                    size="small"
-                    value={selectedDate}
-                    onChange={(e) => {
-                      setSelectedDate(e.target.value);
-                      if (e.target.value) {
-                        const date = new Date(e.target.value);
-                        setSalesFilter(String(date.getFullYear()));
-                      }
-                    }}
-                    InputLabelProps={{
-                      shrink: true,
-                    }}
-                    sx={{ minWidth: 180 }}
-                  />
+                  <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+                    <FormControl size="small" sx={{ minWidth: 120 }}>
+                      <InputLabel>Year</InputLabel>
+                      <Select
+                        value={salesFilter}
+                        label="Year"
+                        onChange={(e) => {
+                          const year = e.target.value;
+                          setSalesFilter(year);
+                          // Clear month and date when year changes
+                          setSelectedMonth(null);
+                          setSelectedDate('');
+                        }}
+                      >
+                        <MenuItem value="2022">2022</MenuItem>
+                        <MenuItem value="2023">2023</MenuItem>
+                        <MenuItem value="2024">2024</MenuItem>
+                        <MenuItem value="2025">2025</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <TextField
+                      type="date"
+                      label="Select Date"
+                      size="small"
+                      value={selectedDate}
+                      onChange={(e) => {
+                        setSelectedDate(e.target.value);
+                        if (e.target.value) {
+                          const date = new Date(e.target.value);
+                          setSalesFilter(String(date.getFullYear()));
+                          setSelectedMonth(date.getMonth() + 1); // Month is 1-12
+                        } else {
+                          setSelectedMonth(null); // Clear month filter when date is cleared
+                        }
+                      }}
+                      InputLabelProps={{
+                        shrink: true,
+                      }}
+                      sx={{ minWidth: 180 }}
+                    />
+                  </Box>
                 </Box>
                 
                 {/* Sales Trend Chart */}
                 <Box sx={{ width: '100%', height: 300, mt: 2, mb: 4 }}>
                   <Typography variant="subtitle2" color="text.secondary" mb={1}>
                     {selectedProduct === 'all' 
-                      ? `Monthly Sales Trend (${salesFilter})`
-                      : `${metrics?.availableProducts?.find(p => String(p.id) === String(selectedProduct))?.name || 'Product'} - Monthly Sales Trend (${salesFilter})`
+                      ? selectedMonth 
+                        ? `Monthly Sales Trend (${new Date(parseInt(salesFilter), selectedMonth - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })})`
+                        : `Monthly Sales Trend (${salesFilter})`
+                      : `${metrics?.availableProducts?.find(p => String(p.id) === String(selectedProduct))?.name || 'Product'} - Monthly Sales Trend (${selectedMonth ? new Date(parseInt(salesFilter), selectedMonth - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : salesFilter})`
                     }
                   </Typography>
                     <ResponsiveContainer width="100%" height="100%">
@@ -1169,6 +1513,303 @@ const Reports = () => {
                       </TableBody>
                     </Table>
                   </TableContainer>
+                )}
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {/* Sales Trend Analysis with AI Restock Predictions */}
+          <Grid item xs={12} width="100%">
+            <Card elevation={0} sx={{ borderRadius: 3, border: '1px solid #e5e7eb' }}>
+              <CardContent>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <TrendingUpIcon sx={{ color: '#2E3A8C', fontSize: 32 }} />
+                    <Box>
+                      <Typography variant="h5" fontWeight={700} sx={{ color: '#2E3A8C' }}>
+                        Sales Trend Analysis
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        AI-Powered Restock Predictions for Upcoming Years
+                      </Typography>
+                    </Box>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    {aiPredictionsLoading && (
+                      <CircularProgress size={20} sx={{ color: '#2E3A8C' }} />
+                    )}
+                    <Chip
+                      label={
+                        Object.keys(aiPredictions).length > 0 
+                          ? "AI-Powered" 
+                          : mlStatus.connected 
+                            ? "AI Available" 
+                            : "Historical Analysis"
+                      }
+                      size="medium"
+                      sx={{
+                        fontWeight: 600,
+                        backgroundColor: Object.keys(aiPredictions).length > 0 
+                          ? '#e8f5e9' 
+                          : mlStatus.connected 
+                            ? '#e3f2fd' 
+                            : '#fff3e0',
+                        color: Object.keys(aiPredictions).length > 0 
+                          ? '#2e7d32' 
+                          : mlStatus.connected 
+                            ? '#1976d2' 
+                            : '#e65100',
+                        border: `1px solid ${
+                          Object.keys(aiPredictions).length > 0 
+                            ? '#4caf50' 
+                            : mlStatus.connected 
+                              ? '#2196f3' 
+                              : '#ff9800'
+                        }`
+                      }}
+                    />
+                  </Stack>
+                </Stack>
+
+                {restockPredictions.length > 0 ? (
+                  <>
+                    {/* Sales Trend Chart with Restock Indicators */}
+                    <Box sx={{ width: '100%', height: 400, mb: 4 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart
+                          data={restockPredictions}
+                          margin={{ top: 20, right: 30, left: 20, bottom: 80 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                          <XAxis
+                            dataKey="period"
+                            angle={-45}
+                            textAnchor="end"
+                            height={100}
+                            tick={{ fontSize: 11 }}
+                            interval={0}
+                          />
+                          <YAxis
+                            label={{
+                              value: 'Predicted Sales (Units)',
+                              angle: -90,
+                              position: 'insideLeft',
+                              fontWeight: 600
+                            }}
+                            tick={{ fontSize: 12 }}
+                          />
+                          <RechartsTooltip
+                            contentStyle={{
+                              borderRadius: 8,
+                              border: '1px solid #e0e0e0',
+                              boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
+                            }}
+                            formatter={(value, name, props) => {
+                              if (name === 'predictedSales') {
+                                const restock = props.payload.restockRecommended;
+                                const aiPowered = props.payload.usingAi ? ' (AI-Powered)' : ' (Historical)';
+                                return [
+                                  `${value} units${aiPowered}${restock ? ' - Restock Recommended' : ''}`,
+                                  'Predicted Sales'
+                                ];
+                              }
+                              return [value, name];
+                            }}
+                            labelStyle={{ fontWeight: 600 }}
+                          />
+                          <Legend
+                            wrapperStyle={{ paddingTop: 10 }}
+                            formatter={(value) => {
+                              if (value === 'predictedSales') return 'Predicted Sales';
+                              if (value === 'restockIndicator') return 'Restock Recommended';
+                              return value;
+                            }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="predictedSales"
+                            stroke="#2E3A8C"
+                            strokeWidth={2.5}
+                            dot={(props) => {
+                              const { payload } = props;
+                              return (
+                                <circle
+                                  cx={props.cx}
+                                  cy={props.cy}
+                                  r={payload.restockRecommended ? 6 : 4}
+                                  fill={payload.restockRecommended ? '#FF6B6B' : '#2E3A8C'}
+                                  stroke={payload.restockRecommended ? '#fff' : '#2E3A8C'}
+                                  strokeWidth={payload.restockRecommended ? 2 : 1}
+                                />
+                              );
+                            }}
+                            activeDot={{ r: 7 }}
+                            name="predictedSales"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </Box>
+
+                    {/* Restock Recommendations Table */}
+                    <Divider sx={{ my: 3 }} />
+                    <Typography variant="h6" fontWeight={600} mb={2}>
+                      Recommended Restock Months
+                    </Typography>
+                    <TableContainer>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow sx={{ bgcolor: '#f5f7ff' }}>
+                            <TableCell>Period</TableCell>
+                            <TableCell>Month</TableCell>
+                            <TableCell align="right">Predicted Sales</TableCell>
+                            <TableCell align="center">AI-Powered</TableCell>
+                            <TableCell align="center">Priority</TableCell>
+                            <TableCell align="center">Restock Recommended</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {restockPredictions
+                            .filter(p => p.restockRecommended)
+                            .sort((a, b) => {
+                              const priorityOrder = { high: 3, medium: 2, low: 1 };
+                              return priorityOrder[b.priority] - priorityOrder[a.priority];
+                            })
+                            .map((prediction, index) => (
+                              <TableRow
+                                key={`${prediction.period}-${index}`}
+                                sx={{
+                                  '&:last-child td, &:last-child th': { border: 0 },
+                                  bgcolor: prediction.priority === 'high' ? '#fff7f7' : '#fff8f0'
+                                }}
+                              >
+                                <TableCell>
+                                  <Typography fontWeight={500}>
+                                    {prediction.period}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Typography color="text.secondary">
+                                    {prediction.month} {prediction.year}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Typography fontWeight={600} sx={{ color: '#2E3A8C' }}>
+                                    {prediction.predictedSales.toLocaleString()} units
+                                  </Typography>
+                                </TableCell>
+                                <TableCell align="center">
+                                  {prediction.usingAi ? (
+                                    <Chip
+                                      icon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+                                      label="AI"
+                                      size="small"
+                                      sx={{
+                                        bgcolor: '#e8f5e9',
+                                        color: '#2e7d32',
+                                        fontWeight: 600
+                                      }}
+                                    />
+                                  ) : (
+                                    <Chip
+                                      label="Hist"
+                                      size="small"
+                                      sx={{
+                                        bgcolor: '#fff3e0',
+                                        color: '#e65100',
+                                        fontWeight: 600
+                                      }}
+                                    />
+                                  )}
+                                </TableCell>
+                                <TableCell align="center">
+                                  <Chip
+                                    label={prediction.priority.toUpperCase()}
+                                    size="small"
+                                    sx={{
+                                      bgcolor:
+                                        prediction.priority === 'high'
+                                          ? '#FF6B6B'
+                                          : prediction.priority === 'medium'
+                                          ? '#FFD166'
+                                          : '#06D6A0',
+                                      color: '#fff',
+                                      fontWeight: 600
+                                    }}
+                                  />
+                                </TableCell>
+                                <TableCell align="center">
+                                  <Chip
+                                    icon={<InventoryIcon sx={{ fontSize: 16 }} />}
+                                    label="Restock"
+                                    size="small"
+                                    color="error"
+                                    sx={{ fontWeight: 600 }}
+                                  />
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          {restockPredictions.filter(p => p.restockRecommended).length === 0 && (
+                            <TableRow>
+                              <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
+                                <Typography color="text.secondary">
+                                  No restock recommendations based on current predictions
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+
+                    {/* Summary Stats */}
+                    <Box sx={{ mt: 3, p: 2, bgcolor: '#f5f7ff', borderRadius: 2 }}>
+                      <Grid container spacing={2}>
+                        <Grid item xs={12} sm={3}>
+                          <Typography variant="body2" color="text.secondary">
+                            Total Restock Months (2 Years)
+                          </Typography>
+                          <Typography variant="h6" fontWeight={700} sx={{ color: '#2E3A8C' }}>
+                            {restockPredictions.filter(p => p.restockRecommended).length}
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} sm={3}>
+                          <Typography variant="body2" color="text.secondary">
+                            High Priority Months
+                          </Typography>
+                          <Typography variant="h6" fontWeight={700} sx={{ color: '#FF6B6B' }}>
+                            {restockPredictions.filter(p => p.restockRecommended && p.priority === 'high').length}
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} sm={3}>
+                          <Typography variant="body2" color="text.secondary">
+                            AI-Powered Predictions
+                          </Typography>
+                          <Typography variant="h6" fontWeight={700} sx={{ color: '#4caf50' }}>
+                            {restockPredictions.filter(p => p.usingAi).length} / {restockPredictions.length}
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} sm={3}>
+                          <Typography variant="body2" color="text.secondary">
+                            Average Predicted Sales
+                          </Typography>
+                          <Typography variant="h6" fontWeight={700} sx={{ color: '#06D6A0' }}>
+                            {Math.round(
+                              restockPredictions.reduce((sum, p) => sum + p.predictedSales, 0) /
+                                restockPredictions.length
+                            ).toLocaleString()}{' '}
+                            units
+                          </Typography>
+                        </Grid>
+                      </Grid>
+                    </Box>
+                  </>
+                ) : (
+                  <Box sx={{ py: 4, textAlign: 'center' }}>
+                    <TrendingUpIcon sx={{ fontSize: 48, color: '#ccc', mb: 1 }} />
+                    <Typography color="text.secondary">
+                      {loading ? 'Loading predictions...' : 'No prediction data available'}
+                    </Typography>
+                  </Box>
                 )}
               </CardContent>
             </Card>

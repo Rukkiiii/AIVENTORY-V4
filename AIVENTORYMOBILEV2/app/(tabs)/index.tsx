@@ -6,7 +6,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'expo-router';
-import api, { getDashboardMetrics, getLowStockItems } from '@/services/api';
+import api, { getDashboardMetrics, getLowStockItems, getProductPrediction } from '@/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const estimateDailyUsage = (stock: number, threshold: number) => {
@@ -103,16 +103,44 @@ export default function DashboardScreen() {
       const productsResponse = await api.get('/products');
       const productsData = Array.isArray(productsResponse?.data) ? productsResponse.data : [];
 
+      // Build alerts and fetch AI predictions for products that need restocking
       const alerts = productsData
         .map((product: any, index: number) => buildAiAlert(product, index))
         .filter((alert): alert is NonNullable<typeof alert> => Boolean(alert));
 
-      const sortedAlerts = alerts.sort((a, b) => {
+      // Fetch AI predictions for each alert
+      const alertsWithPredictions = await Promise.all(
+        alerts.map(async (alert) => {
+          try {
+            const predictionResponse = await getProductPrediction(alert.productId);
+            if (predictionResponse?.data?.success) {
+              const prediction = predictionResponse.data;
+              const recommendedQty = prediction.reorder_suggestion?.suggested_quantity;
+              const depletionDays = prediction.depletion_prediction?.depletion_days;
+              
+              return {
+                ...alert,
+                recommendedQty: recommendedQty || null,
+                aiDepletionDays: depletionDays || alert.daysRemaining,
+                aiMethod: prediction.prediction?.prediction_method || 'calculated'
+              };
+            }
+          } catch (error) {
+            // Silently fail - use default alert data
+            if (__DEV__) {
+              console.warn('Failed to fetch AI prediction for product', alert.productId);
+            }
+          }
+          return alert;
+        })
+      );
+
+      const sortedAlerts = alertsWithPredictions.sort((a, b) => {
         const priority = { critical: 0, warning: 1, normal: 2 } as const;
         if (priority[a.status] !== priority[b.status]) {
           return priority[a.status] - priority[b.status];
         }
-        return a.daysRemaining - b.daysRemaining;
+        return (a.aiDepletionDays || a.daysRemaining) - (b.aiDepletionDays || b.daysRemaining);
       });
 
       setAiAlerts(sortedAlerts);
@@ -190,7 +218,12 @@ export default function DashboardScreen() {
           const id = `ai-${alert.id}-${idx}`;
           const productId = alert.productId ? String(alert.productId) : undefined;
           const title = alert.status === 'critical' ? 'Critical AI Alert' : 'AI Prediction Alert';
-          const message = `${alert.name} predicted to run out ${alert.daysRemaining <= 1 ? 'in 1 day' : `in ${alert.daysRemaining} days`}`;
+          const depletionDays = alert.aiDepletionDays || alert.daysRemaining;
+          const recommendedQty = alert.recommendedQty;
+          let message = `${alert.name} predicted to run out ${depletionDays <= 1 ? 'in 1 day' : `in ${depletionDays} days`}`;
+          if (recommendedQty) {
+            message += `. AI recommends restocking ${recommendedQty} units`;
+          }
           
           // Try multiple ways to find existing notification
           let existing = existingMap.get(id) || 
@@ -210,6 +243,7 @@ export default function DashboardScreen() {
             relativeTime: formatRelativeTime(timestamp),
             type: alert.status === 'critical' ? 'error' : 'warning',
             productId,
+            recommendedQty: recommendedQty || null,
           };
         });
 
@@ -663,8 +697,13 @@ export default function DashboardScreen() {
                   {criticalAlert?.sku || 'N/A'}
                 </ThemedText>
                 <ThemedText style={[styles.alertMessageDanger, { color: dangerColor }]}>
-                  {resolvePredictionLabel(criticalAlert?.daysRemaining)}
+                  {resolvePredictionLabel(criticalAlert?.aiDepletionDays || criticalAlert?.daysRemaining)}
                 </ThemedText>
+                {criticalAlert?.recommendedQty && (
+                  <ThemedText style={[styles.alertMessageDanger, { color: dangerColor, marginTop: 4, fontSize: 12 }]}>
+                    AI recommends restocking {criticalAlert.recommendedQty} units
+                  </ThemedText>
+                )}
                 <View style={styles.alertStats}>
                   <View style={styles.statItem}>
                     <MaterialIcons name="inventory" size={16} color={textSecondaryColor} />
@@ -742,8 +781,13 @@ export default function DashboardScreen() {
                   {warningAlert?.sku || 'N/A'}
                 </ThemedText>
                 <ThemedText style={[styles.alertMessageWarn, { color: warningColor }]}>
-                  {resolvePredictionLabel(warningAlert?.daysRemaining)}
+                  {resolvePredictionLabel(warningAlert?.aiDepletionDays || warningAlert?.daysRemaining)}
                 </ThemedText>
+                {warningAlert?.recommendedQty && (
+                  <ThemedText style={[styles.alertMessageWarn, { color: warningColor, marginTop: 4, fontSize: 12 }]}>
+                    AI recommends restocking {warningAlert.recommendedQty} units
+                  </ThemedText>
+                )}
                 <View style={styles.alertStats}>
                   <View style={styles.statItem}>
                     <MaterialIcons name="inventory" size={16} color={textSecondaryColor} />

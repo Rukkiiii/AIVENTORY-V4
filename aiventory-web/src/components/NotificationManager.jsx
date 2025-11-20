@@ -11,7 +11,7 @@ const NotificationManager = () => {
   const [checkCount, setCheckCount] = useState(0); // Limit the number of checks
   const [lastReset, setLastReset] = useState(Date.now()); // Track when we last reset
 
-  // Function to manually check for stock alerts
+  // Function to manually check for stock alerts with AI predictions
   const checkStockAlerts = async () => {
     // Only run on dashboard page
     if (location.pathname !== '/dashboard') return;
@@ -27,40 +27,68 @@ const NotificationManager = () => {
         const products = await response.json();
         const alerts = [];
         
-        products.forEach(product => {
+        // Check each product and fetch AI predictions
+        for (const product of products) {
           const stock = Number(product.Product_stock || 0);
           const threshold = Number(product.reorder_level || 0);
+          let recommendedQty = null;
+          let depletionDays = null;
+          
+          // Fetch AI prediction for products that need restocking
+          if (stock <= threshold * 1.5) {
+            try {
+              const predictionResponse = await fetch(`${API_BASE}/api/predictions/products/${product.Product_id}`);
+              if (predictionResponse.ok) {
+                const predictionData = await predictionResponse.json();
+                if (predictionData.reorder_suggestion?.suggested_quantity) {
+                  recommendedQty = predictionData.reorder_suggestion.suggested_quantity;
+                }
+                if (predictionData.depletion_prediction?.depletion_days) {
+                  depletionDays = predictionData.depletion_prediction.depletion_days;
+                }
+              }
+            } catch (predError) {
+              // Silently fail - use default recommendations
+              console.warn('Failed to fetch AI prediction for product', product.Product_id);
+            }
+          }
           
           // Only create alerts for actual stock issues
           if (stock <= 0) {
             alerts.push({
               id: `out_of_stock_${product.Product_id}`,
               type: 'out_of_stock',
-              message: `${product.Product_name} is out of stock`,
+              message: `${product.Product_name} is out of stock${recommendedQty ? `. AI recommends restocking ${recommendedQty} units` : ''}`,
               productId: product.Product_id,
               productName: product.Product_name,
-              stock: stock
+              stock: stock,
+              recommendedQty: recommendedQty,
+              depletionDays: depletionDays
             });
           } else if (stock <= threshold) {
             alerts.push({
               id: `critical_${product.Product_id}`,
               type: 'critical',
-              message: `${product.Product_name} is below reorder level (${stock}/${threshold})`,
+              message: `${product.Product_name} is below reorder level (${stock}/${threshold})${recommendedQty ? `. AI recommends restocking ${recommendedQty} units` : ''}${depletionDays ? ` (predicted to run out in ${depletionDays} days)` : ''}`,
               productId: product.Product_id,
               productName: product.Product_name,
-              stock: stock
+              stock: stock,
+              recommendedQty: recommendedQty,
+              depletionDays: depletionDays
             });
           } else if (stock <= threshold * 1.5) {
             alerts.push({
               id: `low_stock_${product.Product_id}`,
               type: 'low_stock',
-              message: `${product.Product_name} is running low (${stock}/${threshold})`,
+              message: `${product.Product_name} is running low (${stock}/${threshold})${recommendedQty ? `. AI recommends restocking ${recommendedQty} units` : ''}${depletionDays ? ` (predicted to run out in ${depletionDays} days)` : ''}`,
               productId: product.Product_id,
               productName: product.Product_name,
-              stock: stock
+              stock: stock,
+              recommendedQty: recommendedQty,
+              depletionDays: depletionDays
             });
           }
-        });
+        }
         
         // Filter out alerts that have already been shown
         const newAlerts = alerts.filter(alert => 
