@@ -1,4 +1,4 @@
-import { StyleSheet, View, ScrollView, TouchableOpacity, RefreshControl, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, ScrollView, TouchableOpacity, RefreshControl, useWindowDimensions, Alert, Modal, FlatList } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Card } from '@/components/ui/card';
@@ -6,7 +6,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'expo-router';
-import api, { getDashboardMetrics, getLowStockItems, getProductPrediction } from '@/services/api';
+import api, { getDashboardMetrics, getLowStockItems, getProductPrediction, sendReorderEmail } from '@/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const estimateDailyUsage = (stock: number, threshold: number) => {
@@ -70,6 +70,8 @@ export default function DashboardScreen() {
   const [loading, setLoading] = useState(true);
   const [aiAlerts, setAiAlerts] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
+  const [alertModalVisible, setAlertModalVisible] = useState(false);
+  const [alertFilter, setAlertFilter] = useState<'low' | 'critical'>('low');
 
   // Fetch dashboard data from API
   const fetchDashboardData = async () => {
@@ -96,7 +98,7 @@ export default function DashboardScreen() {
       const lowStockData = Array.isArray(lowStockResponse?.data) ? lowStockResponse.data : [];
       setLowStockCount(lowStockData.length);
       
-      // Calculate critical items (out of stock)
+      // Calculate critical items (out of stock or at critical level)
       const criticalItems = lowStockData.filter(item => item && (item.Product_stock || 0) <= 0);
       setCriticalItemsCount(criticalItems.length);
 
@@ -144,6 +146,10 @@ export default function DashboardScreen() {
       });
 
       setAiAlerts(sortedAlerts);
+      
+      // Update critical items count from AI alerts (more accurate than lowStockData)
+      const criticalAlertsCount = sortedAlerts.filter(alert => alert.status === 'critical').length;
+      setCriticalItemsCount(criticalAlertsCount);
       
       // Create a map of existing notifications by ID AND message to preserve timestamps
       // Use both ID and a unique key (product ID + message) to better match existing notifications
@@ -377,7 +383,7 @@ export default function DashboardScreen() {
     setRefreshing(false);
   };
 
-  const formatValue = (value) => (loading ? '--' : value);
+  const formatValue = (value) => (loading ? '--' : (value ?? 0));
 
   const lowStockTrend = lowStockCount > 0
     ? {
@@ -440,6 +446,57 @@ export default function DashboardScreen() {
       params: { id: String(alert.productId) }
     });
   };
+
+  const handleReorderAll = async () => {
+    try {
+      const itemsToReorder = filteredAlerts.map(alert => ({
+        name: alert.name,
+        sku: alert.sku,
+        stock: alert.stock,
+        threshold: alert.threshold,
+        status: alert.status,
+        daysRemaining: alert.daysRemaining || alert.aiDepletionDays,
+        recommendedQty: alert.recommendedQty || null,
+      }));
+
+      const response = await sendReorderEmail(itemsToReorder, alertFilter);
+      
+      if (response.data?.success) {
+        const supplierCount = response.data.results?.total || 1;
+        Alert.alert(
+          'Reorder Request',
+          `An email has been sent to ${supplierCount} supplier(s).`,
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert(
+          'Error',
+          response.data?.error || response.data?.message || 'Failed to process reorder request. Please try again.',
+          [{ text: 'OK' }]
+        );
+      }
+    } catch (error) {
+      console.error('Error sending reorder email:', error);
+      Alert.alert(
+        'Error',
+        'Failed to send email. Please check your email configuration.',
+        [{ text: 'OK' }]
+      );
+    }
+  };
+
+  const openAlertModal = (filter: 'low' | 'critical') => {
+    setAlertFilter(filter);
+    setAlertModalVisible(true);
+  };
+
+  const closeAlertModal = () => {
+    setAlertModalVisible(false);
+  };
+
+  const filteredAlerts = alertFilter === 'critical'
+    ? aiAlerts.filter((alert) => alert.status === 'critical')
+    : aiAlerts.filter((alert) => alert.status !== 'normal');
 
   return (
     <ThemedView style={[styles.container, { backgroundColor }]}>
@@ -529,97 +586,109 @@ export default function DashboardScreen() {
             </View>
           </Card>
           
-          <Card
-            style={[
-              styles.statCard,
-              isCompact && { flexBasis: summaryCardFlex, maxWidth: '48%' },
-              {
-                backgroundColor: cardBackgroundColor,
-                borderColor,
-                minHeight: isCompact ? 150 : undefined,
-              },
-            ]}
+          <TouchableOpacity
+            onPress={() => openAlertModal('low')}
+            activeOpacity={0.7}
           >
-            <View style={styles.statHeader}>
-              <MaterialIcons name="warning" size={24} color={warningColor} />
-              <ThemedText
-                type="subtitle"
-                numberOfLines={2}
-                adjustsFontSizeToFit
-                minimumFontScale={0.85}
-                style={[styles.statTitle, { color: textColor }]}
-              >
-                Low-Stock Alerts
-              </ThemedText>
-            </View>
-            <ThemedText style={[styles.statValue, { color: textColor, fontSize: isCompact ? 24 : 28 }]}>
-              {formatValue(lowStockCount)}
-            </ThemedText>
-            <ThemedText
-              numberOfLines={2}
-              adjustsFontSizeToFit
-              minimumFontScale={0.88}
+            <Card
               style={[
-                styles.statDescription,
-                { color: textSecondaryColor, fontSize: isCompact ? 13 : 14 },
+                styles.statCard,
+                isCompact && { flexBasis: summaryCardFlex, maxWidth: '48%' },
+                {
+                  backgroundColor: warningColor + '15',
+                  borderColor: warningColor,
+                  borderWidth: 2,
+                  minHeight: isCompact ? 150 : undefined,
+                },
               ]}
             >
-              Items below threshold
-            </ThemedText>
-            <View style={[styles.trendIndicator, { backgroundColor: lowStockTrend.background }]}>
-              <MaterialIcons name="warning" size={16} color={lowStockTrend.color} />
-              <ThemedText style={[styles.trendText, { color: lowStockTrend.color, fontSize: isCompact ? 11 : 12 }]}>
-                {lowStockTrend.label}
+              <View style={styles.statHeader}>
+                <MaterialIcons name="warning" size={24} color={warningColor} />
+                <ThemedText
+                  type="subtitle"
+                  numberOfLines={2}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.85}
+                  style={[styles.statTitle, { color: textColor }]}
+                >
+                  Low-Stock Alerts
+                </ThemedText>
+              </View>
+              <ThemedText style={[styles.statValue, { color: textColor, fontSize: isCompact ? 24 : 28 }]}>
+                {formatValue(lowStockCount)}
               </ThemedText>
-            </View>
-          </Card>
+              <ThemedText
+                numberOfLines={2}
+                adjustsFontSizeToFit
+                minimumFontScale={0.88}
+                style={[
+                  styles.statDescription,
+                  { color: textSecondaryColor, fontSize: isCompact ? 13 : 14 },
+                ]}
+              >
+                Items below threshold
+              </ThemedText>
+              <View style={[styles.trendIndicator, { backgroundColor: lowStockTrend.background }]}>
+                <MaterialIcons name="warning" size={16} color={lowStockTrend.color} />
+                <ThemedText style={[styles.trendText, { color: lowStockTrend.color, fontSize: isCompact ? 11 : 12 }]}>
+                  {lowStockTrend.label}
+                </ThemedText>
+              </View>
+            </Card>
+          </TouchableOpacity>
         </View>
 
         <View style={[styles.statsRow, { gap: sectionGap }]}>
-          <Card
-            style={[
-              styles.statCard,
-              isCompact && { flexBasis: summaryCardFlex, maxWidth: '48%' },
-              {
-                backgroundColor: cardBackgroundColor,
-                borderColor,
-                minHeight: isCompact ? 150 : undefined,
-              },
-            ]}
+          <TouchableOpacity
+            onPress={() => openAlertModal('critical')}
+            activeOpacity={0.7}
           >
-            <View style={styles.statHeader}>
-              <MaterialIcons name="error" size={24} color={dangerColor} />
-              <ThemedText
-                type="subtitle"
-                numberOfLines={2}
-                adjustsFontSizeToFit
-                minimumFontScale={0.85}
-                style={[styles.statTitle, { color: textColor }]}
-              >
-                Critical Items
-              </ThemedText>
-            </View>
-            <ThemedText style={[styles.statValue, { color: textColor, fontSize: isCompact ? 24 : 28 }]}>
-              {formatValue(criticalItemsCount)}
-            </ThemedText>
-            <ThemedText
-              numberOfLines={2}
-              adjustsFontSizeToFit
-              minimumFontScale={0.88}
+            <Card
               style={[
-                styles.statDescription,
-                { color: textSecondaryColor, fontSize: isCompact ? 13 : 14 },
+                styles.statCard,
+                isCompact && { flexBasis: summaryCardFlex, maxWidth: '48%' },
+                {
+                  backgroundColor: dangerColor + '15',
+                  borderColor: dangerColor,
+                  borderWidth: 2,
+                  minHeight: isCompact ? 150 : undefined,
+                },
               ]}
             >
-              Urgent reorder needed
-            </ThemedText>
-            <View style={[styles.trendIndicator, { backgroundColor: criticalTrend.background }]}>
-              <MaterialIcons name="notification-important" size={16} color={criticalTrend.color} />
-              <ThemedText style={[styles.trendText, { color: criticalTrend.color, fontSize: isCompact ? 11 : 12 }]}>
-                {criticalTrend.label}
+              <View style={styles.statHeader}>
+                <MaterialIcons name="error" size={24} color={dangerColor} />
+                <ThemedText
+                  type="subtitle"
+                  numberOfLines={2}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.85}
+                  style={[styles.statTitle, { color: textColor }]}
+                >
+                  Critical Items
+                </ThemedText>
+              </View>
+              <ThemedText style={[styles.statValue, { color: textColor, fontSize: isCompact ? 24 : 28 }]}>
+                {formatValue(criticalItemsCount)}
               </ThemedText>
-            </View>
-          </Card>
+              <ThemedText
+                numberOfLines={2}
+                adjustsFontSizeToFit
+                minimumFontScale={0.88}
+                style={[
+                  styles.statDescription,
+                  { color: textSecondaryColor, fontSize: isCompact ? 13 : 14 },
+                ]}
+              >
+                Urgent reorder needed
+              </ThemedText>
+              <View style={[styles.trendIndicator, { backgroundColor: criticalTrend.background }]}>
+                <MaterialIcons name="notification-important" size={16} color={criticalTrend.color} />
+                <ThemedText style={[styles.trendText, { color: criticalTrend.color, fontSize: isCompact ? 11 : 12 }]}>
+                  {criticalTrend.label}
+                </ThemedText>
+              </View>
+            </Card>
+          </TouchableOpacity>
           
           <Card
             style={[
@@ -843,8 +912,151 @@ export default function DashboardScreen() {
               </TouchableOpacity>
             </View>
           )}
+
+          {/* Reorder Them All Button */}
+          {(criticalAlert || warningAlert || aiAlerts.length > 0) && (
+            <TouchableOpacity
+              style={[
+                styles.reorderAllButton,
+                { backgroundColor: dangerColor },
+              ]}
+              onPress={handleReorderAll}
+            >
+              <MaterialIcons name="email" size={20} color="#ffffff" />
+              <ThemedText style={styles.reorderAllButtonText}>
+                Reorder Them All
+              </ThemedText>
+            </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
+
+      {/* Alert Modal */}
+      <Modal
+        visible={alertModalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={closeAlertModal}
+      >
+        <View style={[styles.modalOverlay, { backgroundColor: 'rgba(0, 0, 0, 0.5)' }]}>
+          <View style={[styles.modalContent, { backgroundColor: cardBackgroundColor }]}>
+            <View style={[styles.modalHeader, { borderBottomColor: borderColor }]}>
+              <ThemedText type="title" style={[styles.modalTitle, { color: textColor }]}>
+                {alertFilter === 'critical' ? 'Critical Items' : 'Low-Stock Alerts'}
+              </ThemedText>
+              <TouchableOpacity onPress={closeAlertModal}>
+                <MaterialIcons name="close" size={24} color={textColor} />
+              </TouchableOpacity>
+            </View>
+
+            {filteredAlerts.length === 0 ? (
+              <View style={styles.emptyModalContainer}>
+                <MaterialIcons name="inventory" size={48} color={textSecondaryColor} />
+                <ThemedText style={[styles.emptyModalText, { color: textSecondaryColor }]}>
+                  No {alertFilter === 'critical' ? 'critical' : 'low-stock'} items right now.
+                </ThemedText>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredAlerts}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => {
+                  const alertColor = alertFilter === 'critical' ? dangerColor : warningColor;
+                  return (
+                    <View
+                      style={[
+                        styles.modalAlertCard,
+                        {
+                          backgroundColor: cardBackgroundColor,
+                          borderLeftColor: alertColor,
+                        },
+                      ]}
+                    >
+                      <View style={{ flex: 1, gap: 4 }}>
+                        <ThemedText
+                          style={[
+                            styles.modalAlertTitle,
+                            { color: alertColor },
+                          ]}
+                        >
+                          {item.name || 'Unknown Item'}
+                        </ThemedText>
+                        <ThemedText style={[styles.modalAlertMeta, { color: textSecondaryColor }]}>
+                          {item.sku || 'N/A'}
+                        </ThemedText>
+                        <ThemedText
+                          style={[
+                            styles.modalAlertMessage,
+                            { color: alertColor },
+                          ]}
+                        >
+                          {resolvePredictionLabel(item.aiDepletionDays || item.daysRemaining)}
+                        </ThemedText>
+                        {item.recommendedQty && (
+                          <ThemedText
+                            style={[
+                              styles.modalAlertMessage,
+                              {
+                                color: alertColor,
+                                marginTop: 4,
+                                fontSize: 12,
+                              },
+                            ]}
+                          >
+                            AI recommends restocking {item.recommendedQty} units
+                          </ThemedText>
+                        )}
+                      <View style={styles.modalAlertStats}>
+                        <View style={styles.statItem}>
+                          <MaterialIcons name="inventory" size={16} color={textSecondaryColor} />
+                          <ThemedText style={[styles.statText, { color: textSecondaryColor }]}>
+                            {item.stock ?? 0} units
+                          </ThemedText>
+                        </View>
+                        <View style={styles.statItem}>
+                          <MaterialIcons name="flag" size={16} color={textSecondaryColor} />
+                          <ThemedText style={[styles.statText, { color: textSecondaryColor }]}>
+                            {item.threshold ?? 0} threshold
+                          </ThemedText>
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                  );
+                }}
+                style={styles.modalList}
+                contentContainerStyle={styles.modalListContent}
+              />
+            )}
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[
+                  styles.reorderAllButton,
+                  { backgroundColor: dangerColor, marginTop: 12 },
+                ]}
+                onPress={async () => {
+                  await handleReorderAll();
+                  closeAlertModal();
+                }}
+              >
+                <MaterialIcons name="email" size={20} color="#ffffff" />
+                <ThemedText style={styles.reorderAllButtonText}>
+                  Reorder Them All
+                </ThemedText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalCloseButton, { backgroundColor: borderColor }]}
+                onPress={closeAlertModal}
+              >
+                <ThemedText style={[styles.modalCloseButtonText, { color: textColor }]}>
+                  Close
+                </ThemedText>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
@@ -1080,5 +1292,120 @@ const styles = StyleSheet.create({
     color: '#333333',
     fontWeight: '800',
     fontSize: 12,
+  },
+  reorderAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    marginTop: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  reorderAllButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  modalContent: {
+    borderRadius: 16,
+    padding: 20,
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  modalList: {
+    maxHeight: 400,
+  },
+  modalListContent: {
+    gap: 12,
+    paddingVertical: 8,
+  },
+  modalAlertCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    borderRadius: 12,
+    padding: 16,
+    borderLeftWidth: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+    gap: 12,
+  },
+  modalAlertTitle: {
+    fontWeight: '700',
+    fontSize: 16,
+    marginBottom: 4,
+  },
+  modalAlertMeta: {
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  modalAlertMessage: {
+    fontWeight: '700',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  modalAlertStats: {
+    flexDirection: 'row',
+    gap: 12,
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  emptyModalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 48,
+  },
+  emptyModalText: {
+    marginTop: 16,
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  modalActions: {
+    marginTop: 16,
+    gap: 12,
+  },
+  modalCloseButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  modalCloseButtonText: {
+    fontWeight: '600',
+    fontSize: 16,
   },
 });

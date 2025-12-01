@@ -137,3 +137,7 @@ export const getProductPrediction = (productId) => api.get(`/predictions/product
 export const getProductForecast = (productId, days = 30) => api.get(`/predictions/products/${productId}?days=${days}`);
 export const trainLSTMModels = (limit = null) => api.post('/ml/train', limit ? { limit } : {});
 export const getMLServiceHealth = () => api.get('/ml/health');
+
+// API function for sending reorder email
+export const sendReorderEmail = (items, filter, supplierEmail = null) => 
+  api.post('/reorder/send-email', { items, filter, supplierEmail });

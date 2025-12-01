@@ -81,7 +81,7 @@ const Reports = () => {
   const [mlStatus, setMlStatus] = useState({ connected: false, checked: false, trainedModels: 0 });
   const [mlPredictions, setMlPredictions] = useState([]);
   const [predictionsLoading, setPredictionsLoading] = useState(false);
-  const [salesFilter, setSalesFilter] = useState('2025'); // '2023', '2024', or '2025'
+  const [salesFilter, setSalesFilter] = useState('2025'); // '2022', '2023', '2024', '2025', or '2026'
   const [selectedMonth, setSelectedMonth] = useState(null); // Selected month (1-12) or null for all months
   const [selectedDate, setSelectedDate] = useState(''); // Selected date from calendar
   const [selectedProduct, setSelectedProduct] = useState('all'); // 'all' or specific product ID
@@ -1298,6 +1298,7 @@ type: 'prediction'
                         <MenuItem value="2023">2023</MenuItem>
                         <MenuItem value="2024">2024</MenuItem>
                         <MenuItem value="2025">2025</MenuItem>
+                        <MenuItem value="2026">2026</MenuItem>
                       </Select>
                     </FormControl>
                     <TextField

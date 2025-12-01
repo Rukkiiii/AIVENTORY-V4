@@ -90,7 +90,8 @@ def forecast_product_sales(product_id, csv_path='../notebooks/motorparts_clean.c
     try:
         # Read CSV
         df = pd.read_csv(csv_path)
-        df['transaction_date'] = pd.to_datetime(df['transaction_date'], format='%m/%d/%Y', errors='coerce')
+        # Flexible parsing to support both legacy m/d/Y and ISO Y-m-d formats
+        df['transaction_date'] = pd.to_datetime(df['transaction_date'], errors='coerce')
         df = df.dropna(subset=['transaction_date'])
         
         # Filter for this product

@@ -11,6 +11,11 @@ import {
   Stack,
   Typography,
   LinearProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Snackbar,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
@@ -43,6 +48,9 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [settings, setSettings] = useState({ lowStock: true }); // Add settings state
+  const [alertDialog, setAlertDialog] = useState({ open: false, filter: 'low' });
+  const [supplierReminder, setSupplierReminder] = useState('');
+  const [supplierReminderSnackbar, setSupplierReminderSnackbar] = useState(false);
 
   // Load settings from localStorage and listen for changes
   useEffect(() => {
@@ -190,8 +198,7 @@ const Dashboard = () => {
         };
       })
       .filter(Boolean)
-      .sort((a, b) => a.daysRemaining - b.daysRemaining)
-      .slice(0, 6) : [];
+      .sort((a, b) => a.daysRemaining - b.daysRemaining) : [];
 
     return {
       totalItems,
@@ -207,16 +214,98 @@ const Dashboard = () => {
     return '#2E3A8C';
   };
 
-const SummaryCard = ({ icon, title, value, helper, color = '#2E3A8C' }) => (
-  <Card
-    elevation={0}
-    sx={{
-      borderRadius: 3,
-      border: '1px solid #e7e9ef',
-      background: '#fff',
-      height: '100%',
-    }}
-  >
+  const filteredDialogAlerts = alertDialog.open
+    ? (alertDialog.filter === 'critical'
+        ? analytics.alerts.filter((alert) => alert.status === 'critical')
+        : analytics.alerts.filter((alert) => alert.status !== 'normal'))
+    : [];
+
+  const handleCloseAlertDialog = () => {
+    setAlertDialog((prev) => ({ ...prev, open: false }));
+    setSupplierReminder('');
+  };
+
+  const handleReorderAll = async () => {
+    try {
+      const itemsToReorder = filteredDialogAlerts.map(alert => ({
+        name: alert.name,
+        sku: alert.sku,
+        stock: alert.stock,
+        threshold: alert.threshold,
+        status: alert.status,
+        daysRemaining: alert.daysRemaining,
+        recommendedQty: alert.recommendedQty || null,
+      }));
+
+      const response = await fetch(`${API_BASE}/api/reorder/send-email`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          items: itemsToReorder,
+          filter: alertDialog.filter,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        const supplierCount = result.results?.total || 1;
+        setSupplierReminder(`An email has been sent to ${supplierCount} supplier(s).`);
+        setSupplierReminderSnackbar(true);
+      } else {
+        const errorMsg = result.message || result.error || 'Unknown error';
+        console.error('Reorder request error:', result);
+        // Only show error in snackbar, not in dialog
+        setSupplierReminder(`Failed to process reorder request: ${errorMsg}`);
+        setSupplierReminderSnackbar(true);
+      }
+    } catch (error) {
+      console.error('Error processing reorder request:', error);
+      // Only show error in snackbar, not in dialog
+      setSupplierReminder('Failed to process reorder request. Please try again.');
+      setSupplierReminderSnackbar(true);
+    }
+  };
+
+const SummaryCard = ({ icon, title, value, helper, color = '#2E3A8C', onClick }) => {
+  const isInteractive = Boolean(onClick);
+
+  return (
+    <Card
+      elevation={0}
+      onClick={onClick}
+      role={isInteractive ? 'button' : undefined}
+      tabIndex={isInteractive ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!isInteractive) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      sx={{
+        borderRadius: 3,
+        border: '1px solid #e7e9ef',
+        background: '#fff',
+        height: '100%',
+        cursor: isInteractive ? 'pointer' : 'default',
+        transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+        '&:hover': isInteractive
+          ? {
+              transform: 'translateY(-4px)',
+              boxShadow: '0 12px 24px rgba(46, 58, 140, 0.15)',
+            }
+          : undefined,
+        '&:focus-visible': isInteractive
+          ? {
+              outline: '2px solid #2E3A8C',
+              outlineOffset: '2px',
+            }
+          : undefined,
+      }}
+    >
     <CardContent
       sx={{
         display: 'flex',
@@ -243,8 +332,9 @@ const SummaryCard = ({ icon, title, value, helper, color = '#2E3A8C' }) => (
         )}
       </Box>
     </CardContent>
-  </Card>
-);
+    </Card>
+  );
+};
 
 const AlertCard = ({
   alert,
@@ -394,6 +484,10 @@ const AlertCard = ({
                     value={settings.lowStock ? analytics.lowStockCount : 0}
                     helper="Items below reorder threshold"
                     color="#F4A261"
+                    onClick={() =>
+                      settings.lowStock &&
+                      setAlertDialog({ open: true, filter: 'low' })
+                    }
                   />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3} sx={{ display: 'flex' }}>
@@ -403,6 +497,10 @@ const AlertCard = ({
                     value={settings.lowStock ? analytics.criticalCount : 0}
                     helper="Urgent restock required"
                     color="#FF6B6B"
+                    onClick={() =>
+                      settings.lowStock &&
+                      setAlertDialog({ open: true, filter: 'critical' })
+                    }
                   />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3} sx={{ display: 'flex' }}>
@@ -493,6 +591,72 @@ const AlertCard = ({
           </Stack>
         )}
       </Box>
+
+      <Dialog
+        open={alertDialog.open}
+        onClose={handleCloseAlertDialog}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ pr: 5 }}>
+          {alertDialog.filter === 'critical' ? 'Critical Items' : 'Low-Stock Alerts'}
+        </DialogTitle>
+        <DialogContent dividers>
+          {!settings.lowStock ? (
+            <Alert severity="info">
+              Enable low-stock alerts in Settings to view recommendations here.
+            </Alert>
+          ) : filteredDialogAlerts.length === 0 ? (
+            <Box sx={{ py: 6, textAlign: 'center' }}>
+              <Avatar
+                sx={{
+                  bgcolor: '#06D6A010',
+                  color: '#06D6A0',
+                  width: 72,
+                  height: 72,
+                  mx: 'auto',
+                  mb: 2,
+                }}
+              >
+                <InventoryIcon sx={{ fontSize: 36 }} />
+              </Avatar>
+              <Typography variant="h6" fontWeight={600}>
+                All clear!
+              </Typography>
+              <Typography color="text.secondary">
+                No {alertDialog.filter === 'critical' ? 'critical' : 'low-stock'} items right now.
+              </Typography>
+            </Box>
+          ) : (
+            <Stack spacing={2.5}>
+              {filteredDialogAlerts.map((alert) => (
+                <AlertCard key={alert.id} alert={alert} accent={alertAccent(alert.status)} />
+              ))}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleReorderAll}
+            sx={{ mr: 'auto' }}
+          >
+            Reorder Them All
+          </Button>
+          <Button onClick={handleCloseAlertDialog}>Close</Button>
+        </DialogActions>
+      </Dialog>
+      <Snackbar
+        open={supplierReminderSnackbar}
+        autoHideDuration={4000}
+        onClose={() => setSupplierReminderSnackbar(false)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="success" onClose={() => setSupplierReminderSnackbar(false)} sx={{ width: '100%' }}>
+          An email has been sent to supplier.
+        </Alert>
+      </Snackbar>
     </SidebarLayout>
   );
 };

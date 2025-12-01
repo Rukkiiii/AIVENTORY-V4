@@ -2432,6 +2432,221 @@ app.get("/api/predictions/products/:id", async (req, res) => {
 
 // ===================== PREDICT STOCK =========================
 
+// ===================== REORDER REQUEST =========================
+
+// Reorder request (display only - no email sent)
+app.post("/api/reorder/send-email", async (req, res) => {
+  try {
+    const { items, filter } = req.body;
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "No items to reorder" });
+    }
+
+    // Get all suppliers from database for display purposes
+    db.query("SELECT supplier_email, supplier_name FROM supplier WHERE supplier_email IS NOT NULL AND supplier_email != '' AND supplier_email != 'NULL'", (err, results) => {
+      if (err) {
+        console.error("❌ Error fetching suppliers:", err);
+        return res.status(500).json({ error: "Failed to fetch suppliers", message: err.message });
+      }
+
+      const supplierCount = results && results.length > 0 ? results.length : 0;
+      
+      // Just return success message without actually sending emails
+      console.log(`📋 Reorder request processed for ${items.length} items (${supplierCount} supplier(s) would be notified)`);
+      
+      res.json({
+        success: true,
+        message: `Reorder request processed. ${supplierCount > 0 ? `${supplierCount} supplier(s) would be notified.` : 'No suppliers configured.'}`,
+        results: {
+          total: supplierCount,
+          successful: supplierCount,
+          failed: 0,
+          itemsCount: items.length
+        }
+      });
+    });
+  } catch (error) {
+    console.error("❌ Reorder request error:", error);
+    res.status(500).json({ error: "Failed to process reorder request", message: error.message });
+  }
+});
+
+
+// ===================== EMAIL SERVICE =========================
+
+// ===================== SALES ANALYTICS FROM CSV =========================
+
+// Parse motorparts_clean.csv and return monthly sales analytics
+app.get("/api/sales-analytics", (req, res) => {
+  try {
+    // Path to the CSV file (relative to server directory)
+    // From server directory: go up 2 levels to root, then into 'new folder'
+    const csvPath = path.join(__dirname, '..', '..', 'new folder', 'motorparts_clean.csv');
+    
+    console.log(`🔍 Looking for CSV at: ${csvPath}`);
+    console.log(`   Server __dirname: ${__dirname}`);
+    console.log(`   Process cwd: ${process.cwd()}`);
+    
+    if (!fs.existsSync(csvPath)) {
+      // Try alternative path from process.cwd()
+      const altPath = path.join(process.cwd(), 'new folder', 'motorparts_clean.csv');
+      console.log(`   Trying alternative path: ${altPath}`);
+      
+      if (fs.existsSync(altPath)) {
+        console.log(`✅ Found CSV at alternative path: ${altPath}`);
+        return processCsvFile(altPath, res);
+      }
+      
+      console.error(`❌ CSV file not found at either path`);
+      return res.status(404).json({ 
+        error: "CSV file not found", 
+        triedPaths: [csvPath, altPath],
+        serverDir: __dirname,
+        workingDir: process.cwd()
+      });
+    }
+    
+    console.log(`✅ Found CSV file at: ${csvPath}`);
+    processCsvFile(csvPath, res);
+  } catch (error) {
+    console.error("❌ Error in sales-analytics endpoint:", error);
+    res.status(500).json({ error: "Failed to process request", message: error.message });
+  }
+});
+
+// Helper function to process CSV file
+const processCsvFile = (csvPath, res) => {
+  try {
+
+    // Read and parse CSV
+    const csvContent = fs.readFileSync(csvPath, 'utf-8');
+    const lines = csvContent.split('\n').filter(line => line.trim());
+    
+    if (lines.length < 2) {
+      return res.status(400).json({ error: "CSV file is empty or invalid" });
+    }
+
+    // Parse header
+    const headers = lines[0].split(',').map(h => h.trim());
+    const transactionDateIdx = headers.indexOf('transaction_date');
+    const transactionQtyIdx = headers.indexOf('transaction_qty');
+    const unitPriceIdx = headers.indexOf('unit_price');
+    const monthYearIdx = headers.indexOf('month_year');
+    const productNameIdx = headers.indexOf('product_name');
+
+    if (transactionDateIdx === -1 || transactionQtyIdx === -1 || unitPriceIdx === -1) {
+      return res.status(400).json({ error: "Required columns not found in CSV" });
+    }
+
+    // Process transactions
+    const monthlySales = {};
+    const productSales = {};
+    
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      
+      // Handle CSV parsing (accounting for commas in quoted fields)
+      const values = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let j = 0; j < line.length; j++) {
+        const char = line[j];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.trim()); // Add last value
+      
+      if (values.length < headers.length) continue;
+      
+      const dateStr = values[transactionDateIdx];
+      const qty = parseFloat(values[transactionQtyIdx]) || 0;
+      const price = parseFloat(values[unitPriceIdx]) || 0;
+      const monthYear = monthYearIdx !== -1 ? values[monthYearIdx] : null;
+      const productName = productNameIdx !== -1 ? values[productNameIdx] : 'Unknown';
+      
+      const revenue = qty * price;
+      
+      // Group by month_year if available, otherwise parse date
+      let monthKey = monthYear;
+      if (!monthKey && dateStr) {
+        try {
+          const date = new Date(dateStr);
+          if (!isNaN(date.getTime())) {
+            monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+      
+      if (monthKey) {
+        if (!monthlySales[monthKey]) {
+          monthlySales[monthKey] = { revenue: 0, quantity: 0, transactions: 0 };
+        }
+        monthlySales[monthKey].revenue += revenue;
+        monthlySales[monthKey].quantity += qty;
+        monthlySales[monthKey].transactions += 1;
+      }
+      
+      // Track product sales
+      if (productName && productName !== 'Unknown') {
+        if (!productSales[productName]) {
+          productSales[productName] = { revenue: 0, quantity: 0 };
+        }
+        productSales[productName].revenue += revenue;
+        productSales[productName].quantity += qty;
+      }
+    }
+
+    // Convert to arrays and sort
+    const monthlyData = Object.entries(monthlySales)
+      .map(([month, data]) => ({
+        month,
+        revenue: Math.round(data.revenue * 100) / 100,
+        quantity: Math.round(data.quantity),
+        transactions: data.transactions
+      }))
+      .sort((a, b) => a.month.localeCompare(b.month));
+
+    // Top 10 products by revenue
+    const topProducts = Object.entries(productSales)
+      .map(([name, data]) => ({
+        name,
+        revenue: Math.round(data.revenue * 100) / 100,
+        quantity: Math.round(data.quantity)
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    const totalRevenue = monthlyData.reduce((sum, m) => sum + m.revenue, 0);
+    const totalTransactions = monthlyData.reduce((sum, m) => sum + m.transactions, 0);
+    const totalQuantity = monthlyData.reduce((sum, m) => sum + m.quantity, 0);
+    
+    console.log(`✅ Processed CSV: ${monthlyData.length} months, ${totalTransactions} transactions`);
+    
+    res.json({
+      success: true,
+      monthlySales: monthlyData,
+      topProducts,
+      totalRevenue,
+      totalTransactions,
+      totalQuantity
+    });
+  } catch (error) {
+    console.error("❌ Error parsing CSV:", error);
+    res.status(500).json({ error: "Failed to parse CSV", message: error.message });
+  }
+};
+
 // ------------------ GLOBAL ERROR HANDLER ------------------
 app.use((err, req, res, next) => {
   console.error("❌ Unhandled Error:", err);

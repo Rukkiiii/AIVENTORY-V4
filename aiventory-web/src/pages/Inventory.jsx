@@ -61,7 +61,7 @@ import {
   Remove as RemoveIcon,
   Visibility as VisibilityIcon
 } from '@mui/icons-material';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 
 const statusColors = {
   'Good': '#06D6A0',
@@ -71,14 +71,7 @@ const statusColors = {
   'Inactive': '#9E9E9E',
 };
 
-const categories = [
-  'Lubricants',
-  'Battery',
-  'Electrical',
-  'Brakes',
-  'Engine',
-  'Transmission',
-];
+const categories = ['Motorparts'];
 
 export default function Inventory() {
   // Get user data from localStorage
@@ -110,6 +103,8 @@ export default function Inventory() {
   const [page, setPage] = useState(1);
   const itemsPerPage = 8;
   const navigate = useNavigate();
+  const location = useLocation();
+  const [zeroStockOnly, setZeroStockOnly] = useState(false);
 
   // Function to determine product status based on stock levels
   const getProductStatus = (stock, threshold) => {
@@ -192,6 +187,51 @@ export default function Inventory() {
     };
   }, []);
 
+  // Handle navigation intents from other pages (e.g., Dashboard shortcuts)
+  useEffect(() => {
+    if (!location.state) return;
+
+    const { focus, highlightSku } = location.state || {};
+    let shouldClearState = false;
+
+    if (focus === 'lowStock') {
+      setStatusFilter('Critical');
+      setZeroStockOnly(false);
+      setPage(1);
+      setSnackbarMsg('Showing items below the reorder threshold.');
+      setSnackbarOpen(true);
+      shouldClearState = true;
+    } else if (focus === 'critical') {
+      setStatusFilter('Critical');
+      setZeroStockOnly(true);
+      setPage(1);
+      setSnackbarMsg('Showing critical items that are out of stock.');
+      setSnackbarOpen(true);
+      shouldClearState = true;
+    }
+
+    if (highlightSku) {
+      setSearch(highlightSku);
+      setStatusFilter('All');
+      setZeroStockOnly(false);
+      setPage(1);
+      setSnackbarMsg(`Filtering by SKU: ${highlightSku}`);
+      setSnackbarOpen(true);
+      shouldClearState = true;
+    }
+
+    if (shouldClearState) {
+      // Remove the navigation state so filters don't re-apply on refresh
+      navigate(location.pathname, { replace: true });
+    }
+  }, [location.pathname, location.state, navigate]);
+
+  useEffect(() => {
+    if (statusFilter !== 'Critical' && zeroStockOnly) {
+      setZeroStockOnly(false);
+    }
+  }, [statusFilter, zeroStockOnly]);
+
   // Filter inventory based on search, category, and status
   const filteredInventory = inventory.filter(item => {
     const matchesSearch = item.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -201,7 +241,9 @@ export default function Inventory() {
     
     const matchesStatus = statusFilter === 'All' || item.status === statusFilter;
     
-    return matchesSearch && matchesCategory && matchesStatus;
+    const matchesZeroStock = !zeroStockOnly || Number(item.stock ?? 0) <= 0;
+    
+    return matchesSearch && matchesCategory && matchesStatus && matchesZeroStock;
   });
 
   // Pagination
@@ -214,8 +256,9 @@ export default function Inventory() {
   // Get unique categories for filter
   const uniqueCategories = ['All', ...new Set(inventory.map(item => item.category))];
 
-  // Get unique statuses for filter
-  const uniqueStatuses = ['All', ...new Set(inventory.map(item => item.status))];
+  // Get unique statuses for filter, always include key statuses
+  const statusTemplate = ['Good', 'Warning', 'Critical'];
+  const uniqueStatuses = ['All', ...new Set([...statusTemplate, ...inventory.map(item => item.status).filter(Boolean)])];
 
   const handleOpenModal = (item, idx) => {
     if (item) {
@@ -537,6 +580,7 @@ export default function Inventory() {
                   setStatusFilter('All');
                   setSearch('');
                   setPage(1);
+                  setZeroStockOnly(false);
                 }}
                 variant="outlined"
                 size="small"
@@ -545,6 +589,17 @@ export default function Inventory() {
                 Reset Filters
               </Button>
             </Box>
+            {zeroStockOnly && (
+              <Box mt={2}>
+                <Chip
+                  label="Only showing out-of-stock items"
+                  color="error"
+                  variant="outlined"
+                  onDelete={() => setZeroStockOnly(false)}
+                  sx={{ fontWeight: 600 }}
+                />
+              </Box>
+            )}
           </CardContent>
         </Card>
 

@@ -14,7 +14,8 @@ def predict_all_products():
     
     # Read CSV to get all unique products
     df = pd.read_csv(csv_path)
-    df['transaction_date'] = pd.to_datetime(df['transaction_date'], format='%m/%d/%Y', errors='coerce')
+    # Use flexible date parsing so it works with both "m/d/Y" and ISO "Y-m-d"
+    df['transaction_date'] = pd.to_datetime(df['transaction_date'], errors='coerce')
     df = df.dropna(subset=['transaction_date'])
     
     unique_products = sorted(df['product_id'].unique())
